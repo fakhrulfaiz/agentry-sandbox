@@ -6,7 +6,9 @@
  */
 import { createHash, randomBytes } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
+import { createDockerBackend } from './backends/docker.ts'
 import { createFakeBackend, type FakeBackend } from './backends/fake.ts'
+import { createPassthroughNetworkGuard, type Backend } from './backends/types.ts'
 import { loadConfig, type SandboxConfig } from './config.ts'
 import { createServer } from './http/server.ts'
 import { createSandboxService, type SandboxService } from './sandboxes.ts'
@@ -21,7 +23,28 @@ export interface TestService {
   close(): Promise<void>
 }
 
-export async function startTestService(env: Record<string, string> = {}): Promise<TestService> {
+export interface DockerTestService extends Omit<TestService, 'backend'> {
+  backend: Backend
+  /** Removes every sandbox this service created (containers and volumes). */
+  cleanup(): Promise<void>
+}
+
+/**
+ * The same service over the real Docker backend (no egress firewall), for
+ * integration suites that need real envd processes; callers skip without Docker.
+ */
+export async function startDockerTestService(env: Record<string, string> = {}): Promise<DockerTestService> {
+  const base = await startTestService(env, (config) => createDockerBackend(config, createPassthroughNetworkGuard()))
+  return {
+    ...base,
+    backend: base.backend as unknown as Backend,
+    async cleanup() {
+      for (const owner of base.ownersSeen) for (const s of await base.service.list(owner)) await base.service.destroy(owner, s.id).catch(() => {})
+    },
+  }
+}
+
+export async function startTestService(env: Record<string, string> = {}, makeBackend?: (config: SandboxConfig) => Backend): Promise<TestService & { ownersSeen: Set<string> }> {
   const key = randomBytes(16).toString('hex')
   const config = loadConfig({
     AGENTRY_SANDBOX_DATABASE_URL: 'postgres://unused@localhost/unused',
@@ -35,8 +58,11 @@ export async function startTestService(env: Record<string, string> = {}): Promis
     ...env,
   })
   const store = createMemoryStore()
-  const backend = createFakeBackend()
+  const backend = (makeBackend ? makeBackend(config) : createFakeBackend()) as FakeBackend
   const service = createSandboxService({ store, backend, config })
+  const ownersSeen = new Set<string>()
+  const create = service.create.bind(service)
+  service.create = ((owner: string, ...rest: unknown[]) => { ownersSeen.add(owner); return (create as (...a: unknown[]) => unknown)(owner, ...rest) }) as typeof service.create
   const server = createServer({ config, service, store, backend })
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
   return {
@@ -45,6 +71,7 @@ export async function startTestService(env: Record<string, string> = {}): Promis
     config,
     backend,
     service,
+    ownersSeen,
     close: () =>
       new Promise<void>((r) => {
         server.closeAllConnections()
