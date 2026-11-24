@@ -297,3 +297,11 @@ components:
             network: { type: boolean }
             resources: { type: boolean }
             templateFields: { type: array, items: { type: string } }
+        default_image:
+          type: object
+          description: The image used when a template names none, and what it ships (from its org.agentry.* labels, when present).
+          properties:
+            name: { type: string }
+            runtimes: { type: object, additionalProperties: { type: string } }
+            python_packages: { type: array, items: { type: string } }
+            tools: { type: array, items: { type: string } }

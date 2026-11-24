@@ -39,6 +39,8 @@ export interface WireBackend {
   available: boolean
   version?: string
   reason?: string
+  /** The image sandboxes use when a template names none, and what it ships (when labelled). */
+  default_image?: { name: string; runtimes?: Record<string, string>; python_packages?: string[]; tools?: string[] }
   capabilities: { persistent: boolean; network: boolean; resources: boolean; templateFields: string[] }
 }
 

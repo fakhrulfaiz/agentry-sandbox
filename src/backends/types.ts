@@ -12,10 +12,19 @@ export interface BackendCapabilities {
 
 export type Availability = { ok: true; version: string } | { ok: false; reason: string }
 
+/** What an image ships, from its `org.agentry.*` labels. */
+export interface ImageInfo {
+  runtimes: Record<string, string>
+  python_packages: string[]
+  tools: string[]
+}
+
 export interface Backend {
   kind: string
   capabilities: BackendCapabilities
   available(): Promise<Availability>
+  /** What an image ships, when the backend can tell (`undefined` for an unknown or unlabelled image). Never throws. */
+  describeImage?(image: string): Promise<ImageInfo | undefined>
   /** Makes the sandbox and starts it once (first-start provisioning included); returns its handle. */
   create(id: string, owner: string, spec: TemplateSpec): Promise<BackendHandle>
   /** Starts a stopped sandbox (provisions it if it never was); resolves when envd answers. Returns the updated handle. */

@@ -22,6 +22,11 @@ describe('sandbox API client', () => {
     await expect(api.get(s.id)).rejects.toMatchObject({ status: 404, code: 'not_found' })
   })
 
+  it('reports the default image and what it ships', async () => {
+    const [b] = await createSandboxApi({ url: svc.url, key: svc.key, owner: 'alice' }).backends()
+    expect(b).toMatchObject({ available: true, default_image: { name: expect.any(String), runtimes: { python: '3.11' }, python_packages: ['pandas'] } })
+  })
+
   it('maps errors to SandboxApiError and reports backends', async () => {
     const api = createSandboxApi({ url: svc.url, key: 'wrong', owner: 'alice' })
     const e = await api.list().catch((x: unknown) => x)

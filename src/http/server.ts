@@ -201,7 +201,11 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
     const [, a, id, action, ...rest] = seg
     if (a === 'backends' && !id && method === 'GET') {
       const av = await backend.available()
-      return { status: 200, body: list([{ kind: backend.kind, available: av.ok, ...(av.ok ? { version: av.version } : { reason: av.reason }), capabilities: backend.capabilities }]) }
+      const info = av.ok && backend.describeImage ? await backend.describeImage(config.defaultImage) : undefined
+      return { status: 200, body: list([{
+        kind: backend.kind, available: av.ok, ...(av.ok ? { version: av.version } : { reason: av.reason }), capabilities: backend.capabilities,
+        default_image: { name: config.defaultImage, ...(info ? info : {}) },
+      }]) }
     }
     if (a === 'sandboxes') {
       if (!id) {
