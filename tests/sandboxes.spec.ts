@@ -119,14 +119,14 @@ describe('review fixes', () => {
     await expect(service.get('alice', s!.id)).rejects.toBeInstanceOf(NotFoundError)
   })
 
-  it('a failed create can still be deleted with an empty handle (C1)', async () => {
+  it('a failed create leaves nothing behind: no record and no backend leftovers (C1)', async () => {
     const { backend, service } = setup()
     backend.failNextCreate('setup command "exit 3" failed')
     await expect(service.create('alice', { name: 'bad' })).rejects.toThrow('exit 3')
-    const [s] = await service.list('alice')
-    expect(s).toMatchObject({ state: 'failed' })
-    await service.destroy('alice', s!.id)
-    expect(backend.calls).toContain(`destroy ${s!.id} keep=false`)
+    expect(await service.list('alice')).toEqual([])
+    expect(backend.calls.some((c) => /^destroy sbx_\w+ keep=false$/.test(c))).toBe(true)
+    // It does not count against the owner's limits.
+    await expect(service.create('alice', { name: 'good' })).resolves.toMatchObject({ state: 'running' })
   })
 
   it('stop, destroy and endpoint answer BackendUnavailableError when Docker is unreachable (I2)', async () => {
