@@ -58,7 +58,7 @@ export function createEnvdClient(opts: EnvdClientOptions): EnvdClient {
   return {
     async health(signal) {
       try {
-        const res = await doFetch(`${baseUrl}/health`, { signal })
+        const res = await doFetch(`${baseUrl}/health`, signal ? { signal } : {})
         return res.status === 204 || res.ok
       } catch {
         return false
