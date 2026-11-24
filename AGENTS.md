@@ -4,13 +4,14 @@
 
 ## What this is
 
-A standalone service that creates hardened Docker sandboxes on demand. Every sandbox runs E2B's open-source `envd` (Apache-2.0, pinned, unmodified), and callers reach it only through this service's authenticated relay. The Agentry API (`~/code/dsh-agents-api`) uses it as its `sandbox` environment provider; the web app never talks to it directly.
+A standalone service that creates hardened Docker sandboxes on demand. Every sandbox runs E2B's open-source `envd` (Apache-2.0, pinned, unmodified), and callers reach it only through this service's authenticated relay. Every sandbox also gets DeepSeek Harness's remote helper and Node at `/opt/agentry/dsh` (image `agentry/dsh-runtime:<dsh version>`, installed unmodified from npm, injected like envd; `manifest.json` lists paths and digests), which the Agentry API's `@agentry/api/sandbox-runtime` drives over envd. The Agentry API (`~/code/dsh-agents-api`) uses it as its `sandbox` environment provider; the web app never talks to it directly.
 
 Design: `~/code/agentry-web/docs/superpowers/specs/2026-11-25-agentry-sandbox-design.md`. Plan 1: `~/code/agentry-web/docs/superpowers/plans/2026-11-25-agentry-sandbox-service.md`.
 
 ## Rules
 
 - Never add `Co-Authored-By` or any AI attribution to commits or PRs. Commit as `fakhrulfaiz <fakhrulfaiz2003@gmail.com>`.
+- Keep `images/dsh-runtime`'s `DSH_VERSION` equal to the Agentry API's DSH pin (`dsh.pin`), and the default image tag in `src/config.ts` with it.
 - Never modify the DeepSeek Harness repo. Never fork `envd`: pin it, and if it must change, keep a small patch applied at build time.
 - Never publish envd's port 49983 on a non-loopback address. Every envd call carries `X-Access-Token` = `hex(HMAC-SHA256(secret, sandboxId))`; the token is never stored.
 - Containers are hardened: default seccomp, `CapDrop: ALL` + a short `CapAdd` list, not privileged, no bind mounts, no Docker socket, pids/cpu/memory limits. Optional gVisor through `AGENTRY_SANDBOX_RUNTIME=runsc`.
@@ -21,6 +22,6 @@ Design: `~/code/agentry-web/docs/superpowers/specs/2026-11-25-agentry-sandbox-de
 ## Commands
 
 - Prefix shells with `export PATH=$HOME/.nvm/versions/node/v24.19.0/bin:$PATH` (Node 24, pnpm 11).
-- `pnpm test` (Vitest; Docker suites skip when Docker is absent) · `pnpm typecheck` · `pnpm gen` (regenerate the envd client) · `pnpm images:build` (envd + default sandbox images) · `pnpm dev`.
+- `pnpm test` (Vitest; Docker suites skip when Docker is absent) · `pnpm typecheck` · `pnpm gen` (regenerate the envd client) · `pnpm images:build` (envd, DSH runtime, default sandbox and netguard images) · `pnpm dev`.
 - Run the dev server in herdr, never a pop-up terminal: `hc run --bg --no-parent --outlive-parent --name agentry-sandbox -- pnpm dev`.
 - Image pulls and builds use a credential-free Docker config (the Windows credential helper fails in WSL).
