@@ -89,3 +89,15 @@ describe('HTTP API', () => {
     expect((await s.call('/v1/nope')).status).toBe(404)
   })
 })
+
+describe('limits over HTTP', () => {
+  it('answers 429 quota_exceeded with the reason, and 400 for an oversized template', async () => {
+    s.service.setLimitsForTest?.({ maxPerOwner: 1 })
+    expect((await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'a' }) })).status).toBe(201)
+    const r = await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'b' }) })
+    expect(r.status).toBe(429)
+    expect((await json(r)).error).toMatchObject({ code: 'quota_exceeded', message: expect.stringContaining('limit 1') })
+    const big = await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'c', template: { resources: { cpus: 64 } } }) })
+    expect(big.status).toBe(400)
+  })
+})

@@ -10,6 +10,21 @@ export class ConfigError extends Error {
   }
 }
 
+/** Quotas that stop a caller (or an agent) from creating or running too many sandboxes. */
+export interface Limits {
+  maxPerOwner: number
+  maxRunningPerOwner: number
+  maxTotal: number
+  maxRunningTotal: number
+  /** Creates plus resets per owner in any rolling hour. */
+  maxCreatesPerHour: number
+  /** Largest per-sandbox resources a template may ask for. */
+  maxCpus: number
+  maxMemoryMb: number
+  /** Per-owner overrides of the per-owner limits. */
+  owners: Record<string, Partial<Pick<Limits, 'maxPerOwner' | 'maxRunningPerOwner' | 'maxCreatesPerHour'>>>
+}
+
 export interface SandboxConfig {
   port: number
   databaseUrl: string
@@ -27,6 +42,7 @@ export interface SandboxConfig {
   envdReach: 'loopback' | 'ip'
   runtime: 'runc' | 'runsc'
   egress: boolean
+  limits: Limits
 }
 
 const KEY_HASH = /^sha256:[0-9a-f]{64}$/
@@ -52,6 +68,32 @@ function oneOf<T extends string>(env: Env, name: string, allowed: readonly T[], 
   if (!raw) return fallback
   if (!(allowed as readonly string[]).includes(raw)) throw new ConfigError(`${name} must be one of ${allowed.join(', ')}`)
   return raw as T
+}
+
+const OWNER_LIMIT_KEYS = ['maxPerOwner', 'maxRunningPerOwner', 'maxCreatesPerHour'] as const
+
+function ownerLimits(env: Env): Limits['owners'] {
+  const raw = env.AGENTRY_SANDBOX_OWNER_LIMITS?.trim()
+  if (!raw) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new ConfigError('AGENTRY_SANDBOX_OWNER_LIMITS must be JSON: {"<owner>": {"maxPerOwner": n, "maxRunningPerOwner": n, "maxCreatesPerHour": n}}')
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new ConfigError('AGENTRY_SANDBOX_OWNER_LIMITS must be a JSON object keyed by owner')
+  const out: Limits['owners'] = {}
+  for (const [owner, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== 'object' || value === null) throw new ConfigError(`AGENTRY_SANDBOX_OWNER_LIMITS.${owner} must be an object`)
+    const entry: Limits['owners'][string] = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (!(OWNER_LIMIT_KEYS as readonly string[]).includes(k)) throw new ConfigError(`AGENTRY_SANDBOX_OWNER_LIMITS.${owner}.${k} is not a known limit`)
+      if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) throw new ConfigError(`AGENTRY_SANDBOX_OWNER_LIMITS.${owner}.${k} must be an integer ≥ 0`)
+      entry[k as (typeof OWNER_LIMIT_KEYS)[number]] = v
+    }
+    out[owner] = entry
+  }
+  return out
 }
 
 export function loadConfig(env: Env): SandboxConfig {
@@ -81,5 +123,15 @@ export function loadConfig(env: Env): SandboxConfig {
     envdReach: oneOf(env, 'AGENTRY_SANDBOX_ENVD_REACH', ['loopback', 'ip'] as const, 'loopback'),
     runtime: oneOf(env, 'AGENTRY_SANDBOX_RUNTIME', ['runc', 'runsc'] as const, 'runc'),
     egress: oneOf(env, 'AGENTRY_SANDBOX_EGRESS', ['on', 'off'] as const, 'on') === 'on',
+    limits: {
+      maxPerOwner: integer(env, 'AGENTRY_SANDBOX_MAX_PER_OWNER', 5, 0),
+      maxRunningPerOwner: integer(env, 'AGENTRY_SANDBOX_MAX_RUNNING_PER_OWNER', 2, 0),
+      maxTotal: integer(env, 'AGENTRY_SANDBOX_MAX_TOTAL', 50, 0),
+      maxRunningTotal: integer(env, 'AGENTRY_SANDBOX_MAX_RUNNING_TOTAL', 10, 0),
+      maxCreatesPerHour: integer(env, 'AGENTRY_SANDBOX_MAX_CREATES_PER_HOUR', 20, 0),
+      maxCpus: integer(env, 'AGENTRY_SANDBOX_MAX_CPUS', 4),
+      maxMemoryMb: integer(env, 'AGENTRY_SANDBOX_MAX_MEMORY_MB', 8192, 128),
+      owners: ownerLimits(env),
+    },
   }
 }

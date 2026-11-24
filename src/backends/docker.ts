@@ -25,12 +25,16 @@ const CAP_ADD = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'KILL', 'SETGID', 
 export const containerName = (id: string) => `agentry-sbx-${id}`
 export const volumeName = (id: string) => `agentry-sbx-${id}-workspace`
 
-function dockerClient(config: SandboxConfig): Docker {
+/** Docker API calls give up after this; image pulls use a client without a timeout. */
+const DOCKER_TIMEOUT_MS = 60_000
+
+export function dockerClient(config: SandboxConfig, timeout: number | undefined = DOCKER_TIMEOUT_MS): Docker {
+  const t = timeout === undefined ? {} : { timeout }
   const host = config.docker.host
-  if (!host) return new Docker(config.docker.socketPath ? { socketPath: config.docker.socketPath } : {})
+  if (!host) return new Docker({ ...(config.docker.socketPath ? { socketPath: config.docker.socketPath } : {}), ...t })
   const url = new URL(host)
-  if (url.protocol === 'unix:') return new Docker({ socketPath: url.pathname })
-  return new Docker({ host: url.hostname, port: Number(url.port || 2375), protocol: url.protocol === 'https:' ? 'https' : 'http' })
+  if (url.protocol === 'unix:') return new Docker({ socketPath: url.pathname, ...t })
+  return new Docker({ host: url.hostname, port: Number(url.port || 2375), protocol: url.protocol === 'https:' ? 'https' : 'http', ...t })
 }
 
 const isNotFound = (e: unknown) => (e as { statusCode?: number }).statusCode === 404
@@ -65,7 +69,7 @@ elif command -v apk >/dev/null 2>&1; then apk add --no-cache -q ${list}
 else echo "no supported package manager (apt-get or apk) in this image" >&2; exit 1; fi`
 }
 
-export function createDockerBackend(config: SandboxConfig, network: NetworkGuard, client: Docker = dockerClient(config)): Backend {
+export function createDockerBackend(config: SandboxConfig, network: NetworkGuard, client: Docker = dockerClient(config), puller: Docker = dockerClient(config, undefined)): Backend {
   const token = (id: string) => envdToken(config.secret, id)
 
   async function ensureImage(image: string): Promise<void> {
@@ -76,8 +80,8 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
       if (!isNotFound(e)) throw e
     }
     // Pull without any credential helper (public images; a configured registry login would go in authconfig).
-    const stream = await client.pull(image, {})
-    await new Promise<void>((resolve, reject) => client.modem.followProgress(stream, (err) => (err ? reject(err) : resolve())))
+    const stream = await puller.pull(image, {})
+    await new Promise<void>((resolve, reject) => puller.modem.followProgress(stream, (err) => (err ? reject(err) : resolve())))
   }
 
   async function endpoint(handle: BackendHandle): Promise<{ baseUrl: string }> {
@@ -123,7 +127,12 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
     for (const command of spec.setupCommands ?? []) await must(AGENT, command, `setup command "${command}"`, WORKSPACE)
   }
 
-  /** Starts the container, waits for envd, initialises it, and provisions on first start. */
+  /**
+   * Starts the container, waits for envd, initialises it, and provisions on
+   * first start. Until `/init` envd accepts any caller, so a boot that fails
+   * must not leave the container running: `safeBoot` stops it (start) and
+   * `create` removes it.
+   */
   async function boot(id: string, handle: BackendHandle, spec: TemplateSpec): Promise<BackendHandle> {
     const container = client.getContainer(handle.containerId!)
     if (!(await container.inspect()).State.Running) await container.start()
@@ -138,6 +147,31 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
     }
     await envd.init({ ...base, defaultUser: AGENT })
     return { ...handle, provisioned: 'true' }
+  }
+
+  async function stopContainer(containerId: string): Promise<void> {
+    try {
+      await client.getContainer(containerId).stop({ t: 10 })
+    } catch (e) {
+      const code = (e as { statusCode?: number }).statusCode
+      if (code !== 304 && code !== 404) throw e
+    }
+    await network.releaseFor(containerId).catch(() => {})
+  }
+
+  /** Removes a container (by id or name) with its rules, and the volume when given. */
+  async function removeAll(container: string, volume: string | undefined): Promise<void> {
+    let fullId: string | undefined
+    try {
+      fullId = (await client.getContainer(container).inspect()).Id
+    } catch (e) {
+      if (!isNotFound(e)) throw e
+    }
+    if (fullId) {
+      await network.releaseFor(fullId).catch(() => {})
+      await client.getContainer(fullId).remove({ force: true, v: true }).catch((e: unknown) => { if (!isNotFound(e)) throw e })
+    }
+    if (volume) await client.getVolume(volume).remove().catch((e: unknown) => { if (!isNotFound(e)) throw e })
   }
 
   return {
@@ -185,26 +219,39 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
           ...(config.envdReach === 'loopback' ? { PortBindings: { [ENVD_PORT]: [{ HostIp: '127.0.0.1', HostPort: '' }] } } : {}),
         },
       })
-      await container.putArchive(await envdArchive(client, config.envdImage), { path: '/' })
-      return boot(id, { containerId: container.id, volume, network: net, provisioned: 'false' }, spec)
-    },
-
-    start(id, handle, spec) {
-      return boot(id, handle, spec)
-    },
-
-    async stop(handle) {
       try {
-        await client.getContainer(handle.containerId!).stop({ t: 10 })
+        await container.putArchive(await envdArchive(client, config.envdImage), { path: '/' })
+        return await boot(id, { containerId: container.id, volume, network: net, provisioned: 'false' }, spec)
       } catch (e) {
-        const code = (e as { statusCode?: number }).statusCode
-        if (code !== 304 && code !== 404) throw e
+        // Fail closed: nothing half-made stays behind, running or not.
+        await removeAll(container.id, volume).catch(() => {})
+        throw e
       }
     },
 
-    async destroy(handle, { keepWorkspace }) {
-      if (handle.containerId) await client.getContainer(handle.containerId).remove({ force: true }).catch((e: unknown) => { if (!isNotFound(e)) throw e })
-      if (!keepWorkspace && handle.volume) await client.getVolume(handle.volume).remove().catch((e: unknown) => { if (!isNotFound(e)) throw e })
+    async start(id, handle, spec) {
+      try {
+        return await boot(id, handle, spec)
+      } catch (e) {
+        await stopContainer(handle.containerId!).catch(() => {})
+        throw e
+      }
+    },
+
+    async stop(handle) {
+      await stopContainer(handle.containerId!)
+    },
+
+    async destroy(id, handle, { keepWorkspace }) {
+      await removeAll(handle.containerId ?? containerName(id), keepWorkspace ? undefined : (handle.volume ?? volumeName(id)))
+    },
+
+    async maintain(_id, handle, spec) {
+      if (handle.containerId) await network.applyFor(handle.containerId, { network: spec.network !== false })
+    },
+
+    async releaseOwner(owner) {
+      await network.removeOwnerNetwork?.(owner)
     },
 
     async status(handle) {

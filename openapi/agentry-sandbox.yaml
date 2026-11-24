@@ -59,6 +59,7 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
     get:
       summary: List sandboxes
@@ -93,6 +94,7 @@ paths:
         "200": { $ref: "#/components/responses/Sandbox" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /v1/sandboxes/{id}/stop:
     parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Owner" }]
@@ -116,6 +118,7 @@ paths:
         "200": { $ref: "#/components/responses/Sandbox" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /v1/sandboxes/{id}/envd/{path}:
     parameters:
@@ -220,7 +223,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Template" }
     Error:
-      description: "`unauthorized` 401, `owner_required` 400, `invalid_request` 400, `not_found` 404, `sandbox_failed` 409, `backend_unavailable` 503."
+      description: "`unauthorized` 401, `owner_required` 400, `invalid_request` 400 (also a template over the per-sandbox CPU or memory maximum), `not_found` 404, `sandbox_failed` 409, `quota_exceeded` 429 (a sandbox, running or creation-rate limit; the message says which), `backend_unavailable` 503."
       content:
         application/json:
           schema:

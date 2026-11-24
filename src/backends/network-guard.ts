@@ -36,7 +36,12 @@ function subnetRules(subnet: string, tag: string): string {
 
 export interface DockerNetworkGuard extends NetworkGuard {
   removeOwnerNetwork(owner: string): Promise<void>
+  /** Drops `agentry-c-*` rules of containers not in `active` (left by crashes or older versions). */
+  prune(activeContainerIds: string[]): Promise<number>
 }
+
+/** Owner networks get /24s from this pool, so many owners fit (Docker's defaults hand out whole /16s). */
+export const SUBNET_POOL_PREFIX = '10.213'
 
 export function createNetworkGuard(docker: Docker, config: SandboxConfig): DockerNetworkGuard {
   async function helper(script: string): Promise<void> {
@@ -67,16 +72,59 @@ export function createNetworkGuard(docker: Docker, config: SandboxConfig): Docke
       const name = ownerNetworkName(owner)
       try {
         await docker.getNetwork(name).inspect()
+        return name
       } catch (e) {
         if (!isNotFound(e)) throw e
-        await docker.createNetwork({
-          Name: name,
-          Driver: 'bridge',
-          Options: { 'com.docker.network.bridge.enable_icc': 'false' },
-          Labels: { 'agentry.managed': 'true', 'agentry.network.owner': owner },
-        })
       }
-      return name
+      const used = new Set<string>()
+      for (const n of await docker.listNetworks()) for (const c of n.IPAM?.Config ?? []) if (c.Subnet) used.add(c.Subnet)
+      for (let i = 0; i < 256; i++) {
+        const subnet = `${SUBNET_POOL_PREFIX}.${String(i)}.0/24`
+        if (used.has(subnet)) continue
+        try {
+          await docker.createNetwork({
+            Name: name,
+            Driver: 'bridge',
+            EnableIPv6: false,
+            IPAM: { Driver: 'default', Config: [{ Subnet: subnet, Gateway: `${SUBNET_POOL_PREFIX}.${String(i)}.1` }] },
+            Options: { 'com.docker.network.bridge.enable_icc': 'false' },
+            Labels: { 'agentry.managed': 'true', 'agentry.network.owner': owner },
+          })
+          return name
+        } catch (e) {
+          const code = (e as { statusCode?: number }).statusCode
+          // Another create for this owner won the race: use its network.
+          if (code === 409) {
+            try {
+              await docker.getNetwork(name).inspect()
+              return name
+            } catch {
+              continue
+            }
+          }
+          // The subnet overlaps a network Docker knows another way: try the next one.
+          if (/overlap|pool/i.test((e as Error).message)) continue
+          throw e
+        }
+      }
+      throw new Error('no free sandbox subnet left in the pool')
+    },
+
+    async releaseFor(containerId) {
+      if (!config.egress) return
+      await helper(`drop_tagged agentry-c-${containerId.slice(0, 12)}`)
+    },
+
+    async prune(active) {
+      if (!config.egress) return 0
+      const keep = active.map((id) => `agentry-c-${id.slice(0, 12)}`).join(' ')
+      const script = `keep="${keep}"; n=0
+for tag in $( (iptables -S DOCKER-USER; iptables -S INPUT) | grep -o 'agentry-c-[0-9a-f]*' | sort -u); do
+  case " $keep " in *" $tag "*) ;; *) drop_tagged "$tag"; n=$((n+1));; esac
+done
+echo "pruned=$n"`
+      await helper(script)
+      return 0
     },
 
     async applyFor(containerId, { network }) {

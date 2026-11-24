@@ -6,6 +6,7 @@
  * reads the Unix user from. Closing the client aborts the upstream request.
  */
 import http from 'node:http'
+import { pipeline } from 'node:stream'
 import type { SandboxService } from '../sandboxes.ts'
 
 /** Request headers forwarded to envd; everything else is dropped. */
@@ -16,6 +17,9 @@ const ENVD_USER = /^[a-z_][a-z0-9_-]{0,31}$/
 export async function relay(service: SandboxService, owner: string, id: string, rest: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const { baseUrl, token } = await service.endpoint(owner, id)
   await service.touch(owner, id)
+  // The client may have left while the sandbox was starting.
+  if (req.destroyed || res.destroyed) return
+  const done = service.beginUse(id)
   const raw = req.url ?? ''
   const search = raw.includes('?') ? raw.slice(raw.indexOf('?')) : ''
   const target = new URL(`/${rest}${search}`, baseUrl)
@@ -35,15 +39,8 @@ export async function relay(service: SandboxService, owner: string, id: string, 
       for (const [k, v] of Object.entries(up.headers)) if (v !== undefined && !HOP_BY_HOP.has(k)) out[k] = v
       res.writeHead(up.statusCode ?? 502, out)
       res.flushHeaders()
-      up.on('data', (chunk: Buffer) => res.write(chunk))
-      up.on('end', () => {
-        res.end()
-        resolve()
-      })
-      up.on('error', () => {
-        res.destroy()
-        resolve()
-      })
+      // pipeline honours backpressure: a slow client slows envd instead of filling memory.
+      pipeline(up, res, () => resolve())
     })
     upstream.on('error', (e) => {
       if (!res.headersSent) {
@@ -58,5 +55,5 @@ export async function relay(service: SandboxService, owner: string, id: string, 
       resolve()
     })
     req.pipe(upstream)
-  })
+  }).finally(done)
 }

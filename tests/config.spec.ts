@@ -52,3 +52,16 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...base, AGENTRY_SANDBOX_PORT: 'abc' })).toThrow('AGENTRY_SANDBOX_PORT')
   })
 })
+
+describe('limits config', () => {
+  it('has defaults and reads every limit and per-owner overrides', () => {
+    const d = loadConfig(base).limits
+    expect(d).toEqual({ maxPerOwner: 5, maxRunningPerOwner: 2, maxTotal: 50, maxRunningTotal: 10, maxCreatesPerHour: 20, maxCpus: 4, maxMemoryMb: 8192, owners: {} })
+    const c = loadConfig({ ...base, AGENTRY_SANDBOX_MAX_PER_OWNER: '9', AGENTRY_SANDBOX_MAX_RUNNING_TOTAL: '3', AGENTRY_SANDBOX_OWNER_LIMITS: '{"alice":{"maxPerOwner":20,"maxRunningPerOwner":4}}' }).limits
+    expect(c).toMatchObject({ maxPerOwner: 9, maxRunningTotal: 3, owners: { alice: { maxPerOwner: 20, maxRunningPerOwner: 4 } } })
+  })
+  it('rejects malformed owner limits', () => {
+    expect(() => loadConfig({ ...base, AGENTRY_SANDBOX_OWNER_LIMITS: '{bad' })).toThrow('AGENTRY_SANDBOX_OWNER_LIMITS')
+    expect(() => loadConfig({ ...base, AGENTRY_SANDBOX_OWNER_LIMITS: '{"alice":{"maxPerOwner":-1}}' })).toThrow('AGENTRY_SANDBOX_OWNER_LIMITS')
+  })
+})

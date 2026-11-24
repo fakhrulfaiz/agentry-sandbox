@@ -20,9 +20,9 @@ export function docker(): Docker {
 }
 
 /** Runs a command in a throwaway container of `image`; resolves with exit code and combined output. */
-export async function runOnce(image: string, cmd: string[], user?: string): Promise<{ code: number; output: string }> {
+export async function runOnce(image: string, cmd: string[], user?: string, opts: { privileged?: boolean; hostNet?: boolean } = {}): Promise<{ code: number; output: string }> {
   const d = docker()
-  const container = await d.createContainer({ Image: image, Cmd: cmd, ...(user ? { User: user } : {}), Tty: true, HostConfig: { AutoRemove: false } })
+  const container = await d.createContainer({ Image: image, Cmd: cmd, ...(user ? { User: user } : {}), Tty: true, HostConfig: { AutoRemove: false, ...(opts.privileged ? { Privileged: true } : {}), ...(opts.hostNet ? { NetworkMode: 'host' } : {}) } })
   try {
     await container.start()
     const { StatusCode } = (await container.wait()) as { StatusCode: number }

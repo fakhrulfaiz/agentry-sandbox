@@ -21,10 +21,15 @@ export interface Backend {
   /** Starts a stopped sandbox (provisions it if it never was); resolves when envd answers. Returns the updated handle. */
   start(id: string, handle: BackendHandle, spec: TemplateSpec): Promise<BackendHandle>
   stop(handle: BackendHandle): Promise<void>
-  destroy(handle: BackendHandle, opts: { keepWorkspace: boolean }): Promise<void>
+  /** Removes the sandbox; works from the id alone when the handle is empty (a create that failed half-way). */
+  destroy(id: string, handle: BackendHandle, opts: { keepWorkspace: boolean }): Promise<void>
   status(handle: BackendHandle): Promise<'running' | 'stopped' | 'missing'>
   /** Where envd answers for a running sandbox. */
   endpoint(handle: BackendHandle): Promise<{ baseUrl: string }>
+  /** Periodic upkeep of a running sandbox (Docker: re-apply its network rules). */
+  maintain?(id: string, handle: BackendHandle, spec: TemplateSpec): Promise<void>
+  /** Frees what an owner held once their last sandbox is gone (Docker: their network). */
+  releaseOwner?(owner: string): Promise<void>
   /** Every sandbox this backend manages, from its own labels (for reconciliation). */
   listManaged(): Promise<{ id: string; owner: string; handle: BackendHandle }[]>
 }
@@ -35,6 +40,10 @@ export interface NetworkGuard {
   networkFor(owner: string): Promise<string>
   /** (Re)applies egress rules for a running container; `network: false` blocks all egress. */
   applyFor(containerId: string, opts: { network: boolean }): Promise<void>
+  /** Removes a container's own rules (on stop and destroy). */
+  releaseFor(containerId: string): Promise<void>
+  /** Removes an owner's network once they have no sandboxes. */
+  removeOwnerNetwork?(owner: string): Promise<void>
 }
 
 /** A guard that places sandboxes on Docker's default bridge and applies no rules (tests, egress off). */
@@ -44,5 +53,6 @@ export function createPassthroughNetworkGuard(): NetworkGuard {
       return 'bridge'
     },
     async applyFor() {},
+    async releaseFor() {},
   }
 }

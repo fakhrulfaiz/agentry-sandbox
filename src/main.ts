@@ -30,11 +30,16 @@ async function main(): Promise<void> {
 
   const available = await backend.available()
   log(available.ok ? `docker ${available.version}` : `docker unavailable: ${available.reason}`)
-  if (available.ok) log('reconciled', await service.reconcile())
+  if (available.ok) {
+    log('reconciled', await service.reconcile())
+    // Rules left by crashed or removed sandboxes would block a later container that reuses the IP.
+    const active = (await docker.listContainers({ all: true, filters: { label: ['agentry.managed=true'] } })).map((c) => c.Id)
+    await guard.prune(active).catch((e: unknown) => log('rule prune failed', String(e)))
+  }
 
   const server = createServer({ config, service, store, backend })
   await new Promise<void>((resolve) => server.listen(config.port, host, resolve))
-  log(`listening on http://${host}:${String(config.port)} (envd reach: ${config.envdReach}, runtime: ${config.runtime}, egress guard: ${config.egress ? 'on' : 'off'})`)
+  log(`listening on http://${host}:${String(config.port)} (envd reach: ${config.envdReach}, runtime: ${config.runtime}, egress guard: ${config.egress ? 'on' : 'off'}, limits: ${JSON.stringify({ ...config.limits, owners: Object.keys(config.limits.owners).length })})`)
 
   const sweep = setInterval(() => {
     void service

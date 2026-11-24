@@ -70,12 +70,12 @@ describe.skipIf(!dockerAvailable)('docker backend', () => {
     const backend = createDockerBackend(cfg, createPassthroughNetworkGuard())
     const a = newId()
     const ha = await backend.create(a, 'alice', {})
-    await backend.destroy(ha, { keepWorkspace: false })
+    await backend.destroy(a, ha, { keepWorkspace: false })
     expect(await backend.status(ha)).toBe('missing')
     await expect(docker().getVolume(ha.volume!).inspect()).rejects.toThrow()
     const b = newId()
     const hb = await backend.create(b, 'alice', {})
-    await backend.destroy(hb, { keepWorkspace: true })
+    await backend.destroy(b, hb, { keepWorkspace: true })
     expect((await docker().getVolume(hb.volume!).inspect()).Name).toBe(hb.volume)
   })
 
@@ -117,5 +117,33 @@ describe.skipIf(!dockerAvailable)('docker backend', () => {
     const a = await backend.available()
     expect(a.ok).toBe(true)
     expect(a.ok && a.version).toMatch(/^\d+\./)
+  })
+
+  it('a create that fails during setup leaves no container and no volume behind (C1, I1)', async () => {
+    const backend = createDockerBackend(config(), createPassthroughNetworkGuard())
+    const id = newId()
+    await expect(backend.create(id, 'alice', { setupCommands: ['exit 3'] })).rejects.toThrow(/exit 3/)
+    const left = await docker().listContainers({ all: true, filters: { label: [`agentry.sandbox.id=${id}`] } })
+    expect(left).toEqual([])
+    await expect(docker().getVolume(`agentry-sbx-${id}-workspace`).inspect()).rejects.toThrow()
+  })
+
+  it('destroy works from the id alone when the handle is empty', async () => {
+    const backend = createDockerBackend(config(), createPassthroughNetworkGuard())
+    const id = newId()
+    await backend.create(id, 'alice', {})
+    await backend.destroy(id, {}, { keepWorkspace: false })
+    expect(await docker().listContainers({ all: true, filters: { label: [`agentry.sandbox.id=${id}`] } })).toEqual([])
+  })
+
+  it('a start that fails stops the container again (fails closed)', async () => {
+    const cfg = config()
+    const backend = createDockerBackend(cfg, createPassthroughNetworkGuard())
+    const id = newId()
+    const handle = await backend.create(id, 'alice', {})
+    await backend.stop(handle)
+    const bad = createDockerBackend({ ...cfg, startTimeoutMs: 2_000, envdReach: 'ip' }, createPassthroughNetworkGuard())
+    await expect(bad.start(id, handle, {})).rejects.toThrow(/envd/)
+    expect(await backend.status(handle)).toBe('stopped')
   })
 })

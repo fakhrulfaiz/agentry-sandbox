@@ -105,3 +105,115 @@ describe('sandbox service', () => {
     await expect(service.get('alice', s.id)).rejects.toBeInstanceOf(NotFoundError)
   })
 })
+
+describe('review fixes', () => {
+  it('destroy during provisioning waits for the build and leaves nothing behind (I3)', async () => {
+    const { backend, service } = setup()
+    backend.setCreateDelay(50)
+    const creating = service.create('alice', { name: 'slow' }).catch((e: unknown) => e)
+    await new Promise((r) => setTimeout(r, 10))
+    const [s] = await service.list('alice')
+    await service.destroy('alice', s!.id)
+    await creating
+    expect(await backend.listManaged()).toEqual([])
+    await expect(service.get('alice', s!.id)).rejects.toBeInstanceOf(NotFoundError)
+  })
+
+  it('a failed create can still be deleted with an empty handle (C1)', async () => {
+    const { backend, service } = setup()
+    backend.failNextCreate('setup command "exit 3" failed')
+    await expect(service.create('alice', { name: 'bad' })).rejects.toThrow('exit 3')
+    const [s] = await service.list('alice')
+    expect(s).toMatchObject({ state: 'failed' })
+    await service.destroy('alice', s!.id)
+    expect(backend.calls).toContain(`destroy ${s!.id} keep=false`)
+  })
+
+  it('stop, destroy and endpoint answer BackendUnavailableError when Docker is unreachable (I2)', async () => {
+    const { backend, service } = setup()
+    const s = await service.create('alice', { name: 'box' })
+    backend.failConnections('connect ECONNREFUSED /var/run/docker.sock')
+    await expect(service.stop('alice', s.id)).rejects.toBeInstanceOf(BackendUnavailableError)
+    await expect(service.endpoint('alice', s.id)).rejects.toBeInstanceOf(BackendUnavailableError)
+    await expect(service.destroy('alice', s.id)).rejects.toBeInstanceOf(BackendUnavailableError)
+    backend.failConnections(undefined)
+    expect((await service.get('alice', s.id)).state).not.toBe('deleting')
+  })
+
+  it('the idle sweep skips a sandbox with an open connection and counts its close as use (I4)', async () => {
+    const { service, advance } = setup()
+    const s = await service.create('alice', { name: 'busy' })
+    const done = service.beginUse(s.id)
+    advance(31 * 60_000)
+    expect(await service.sweepIdle()).toEqual([])
+    done()
+    expect(await service.sweepIdle()).toEqual([])
+    advance(31 * 60_000)
+    expect(await service.sweepIdle()).toEqual([s.id])
+  })
+
+  it('the sweep re-applies guard rules to running sandboxes (I8)', async () => {
+    const { backend, service } = setup()
+    const s = await service.create('alice', { name: 'box' })
+    backend.calls.length = 0
+    await service.sweepIdle()
+    expect(backend.calls).toContain(`maintain ${s.id}`)
+  })
+
+  it("an owner's last sandbox removed releases the owner's network (I6)", async () => {
+    const { backend, service } = setup()
+    const a = await service.create('alice', { name: 'a' })
+    const b = await service.create('alice', { name: 'b' })
+    await service.destroy('alice', a.id)
+    expect(backend.calls).not.toContain('releaseOwner alice')
+    await service.destroy('alice', b.id)
+    expect(backend.calls).toContain('releaseOwner alice')
+  })
+})
+
+describe('limits', () => {
+  const limited = (over: Partial<typeof config.limits>, owners: typeof config.limits.owners = {}) => {
+    let t = 1_000_000
+    const store = createMemoryStore()
+    const backend = createFakeBackend()
+    const service = createSandboxService({ store, backend, config: { ...config, limits: { ...config.limits, ...over, owners } }, now: () => t })
+    return { backend, service, advance: (ms: number) => { t += ms } }
+  }
+
+  it('caps sandboxes per owner, per owner running, and lets per-owner overrides raise it', async () => {
+    const { service } = limited({ maxPerOwner: 2, maxRunningPerOwner: 1 }, { bob: { maxPerOwner: 3, maxRunningPerOwner: 3 } })
+    const a = await service.create('alice', { name: 'a' })
+    await expect(service.create('alice', { name: 'b' })).rejects.toMatchObject({ name: 'QuotaExceededError', message: expect.stringContaining('running') })
+    await service.stop('alice', a.id)
+    const b = await service.create('alice', { name: 'b' })
+    await expect(service.create('alice', { name: 'c' })).rejects.toMatchObject({ name: 'QuotaExceededError', message: expect.stringContaining('limit 2') })
+    await expect(service.start('alice', a.id)).rejects.toMatchObject({ name: 'QuotaExceededError' })
+    await service.stop('alice', b.id)
+    expect((await service.start('alice', a.id)).state).toBe('running')
+    for (const n of ['1', '2', '3']) await service.create('bob', { name: n })
+  })
+
+  it('caps the whole service, running and total', async () => {
+    const { service } = limited({ maxTotal: 2, maxRunningTotal: 1 })
+    const a = await service.create('alice', { name: 'a' })
+    await expect(service.create('bob', { name: 'b' })).rejects.toMatchObject({ name: 'QuotaExceededError' })
+    await service.stop('alice', a.id)
+    await service.create('bob', { name: 'b' })
+    await expect(service.create('carol', { name: 'c' })).rejects.toMatchObject({ name: 'QuotaExceededError', message: expect.stringContaining('service') })
+  })
+
+  it('rate-limits creates and resets per owner per hour', async () => {
+    const { service, advance } = limited({ maxCreatesPerHour: 2, maxPerOwner: 10, maxRunningPerOwner: 10 })
+    const a = await service.create('alice', { name: 'a' })
+    await service.reset('alice', a.id, { keepWorkspace: true })
+    await expect(service.create('alice', { name: 'b' })).rejects.toMatchObject({ name: 'QuotaExceededError', message: expect.stringContaining('per hour') })
+    advance(61 * 60_000)
+    await service.create('alice', { name: 'b' })
+  })
+
+  it('refuses templates asking for more than the per-sandbox maximum', async () => {
+    const { service } = limited({ maxCpus: 2, maxMemoryMb: 1024 })
+    await expect(service.create('alice', { name: 'a', template: { resources: { cpus: 4 } } })).rejects.toMatchObject({ name: 'LimitError' })
+    await expect(service.create('alice', { name: 'a', template: { resources: { memoryMb: 4096 } } })).rejects.toMatchObject({ name: 'LimitError' })
+  })
+})

@@ -23,6 +23,18 @@ Hardened Docker sandboxes on demand for Agentry agents. Each sandbox is one cont
    | `AGENTRY_SANDBOX_CPUS` / `_MEMORY_MB` / `_PIDS` | `2` / `4096` / `4096` | per-sandbox limits |
    | `AGENTRY_SANDBOX_DEFAULT_IMAGE` / `_ENVD_IMAGE` | `agentry/sandbox:1` / `agentry/envd:envd-v0.6.13` | |
 
+   **Limits** (so no caller or agent can run away with resources; going over one answers 429 `quota_exceeded` with the reason):
+
+   | Variable | Default | |
+   |---|---|---|
+   | `AGENTRY_SANDBOX_MAX_PER_OWNER` | `5` | sandboxes an owner may have (running or stopped) |
+   | `AGENTRY_SANDBOX_MAX_RUNNING_PER_OWNER` | `2` | running at once per owner |
+   | `AGENTRY_SANDBOX_MAX_TOTAL` | `50` | sandboxes on the whole service |
+   | `AGENTRY_SANDBOX_MAX_RUNNING_TOTAL` | `10` | running at once across everyone |
+   | `AGENTRY_SANDBOX_MAX_CREATES_PER_HOUR` | `20` | creates plus resets per owner in any hour |
+   | `AGENTRY_SANDBOX_MAX_CPUS` / `_MAX_MEMORY_MB` | `4` / `8192` | the most a template may ask for (400 if more) |
+   | `AGENTRY_SANDBOX_OWNER_LIMITS` | — | per-owner overrides, JSON: `{"alice":{"maxPerOwner":10,"maxRunningPerOwner":4,"maxCreatesPerHour":50}}` |
+
 6. Run in herdr: `hc run --bg --no-parent --outlive-parent --name agentry-sandbox -- pnpm dev`, then `AGENTRY_SANDBOX_KEY=<key> pnpm exec tsx scripts/smoke.ts`.
 
 ## Security model

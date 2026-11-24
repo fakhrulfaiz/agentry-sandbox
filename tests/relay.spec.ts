@@ -91,3 +91,35 @@ describe('envd relay', () => {
     expect(s.backend.calls).toEqual([`start ${id}`])
   })
 })
+
+describe('relay backpressure (I5)', () => {
+  it('a slow client slows envd instead of the relay buffering everything', async () => {
+    const id = await create()
+    let blocked = 0
+    let written = 0
+    const chunk = Buffer.alloc(64 * 1024, 120)
+    handler = (_req, res) => {
+      res.writeHead(200)
+      const pump = () => {
+        while (written < 64 * 1024 * 1024) {
+          written += chunk.length
+          if (!res.write(chunk)) {
+            blocked++
+            res.once('drain', pump)
+            return
+          }
+        }
+        res.end()
+      }
+      pump()
+    }
+    const r = await s.call(`/v1/sandboxes/${id}/envd/big`)
+    const reader = r.body!.getReader()
+    await reader.read()
+    await new Promise((x) => setTimeout(x, 400))
+    // Without backpressure the relay would have pulled all 64 MiB into memory by now.
+    expect(blocked).toBeGreaterThan(0)
+    expect(written).toBeLessThan(32 * 1024 * 1024)
+    await reader.cancel()
+  })
+})

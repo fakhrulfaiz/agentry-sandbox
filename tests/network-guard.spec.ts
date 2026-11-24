@@ -1,4 +1,8 @@
 import { randomBytes } from 'node:crypto'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { GUARD_IMAGE } from '../src/backends/network-guard.ts'
+import { runOnce } from './support/docker.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createDockerBackend } from '../src/backends/docker.ts'
 import { createNetworkGuard } from '../src/backends/network-guard.ts'
@@ -34,7 +38,7 @@ describe.skipIf(!dockerAvailable)('network guard', () => {
   })
 
   afterAll(async () => {
-    for (const s of [a, b, off]) if (s) await backend.destroy(s.handle, { keepWorkspace: false })
+    for (const s of [a, b, off]) if (s) await backend.destroy(s.id, s.handle, { keepWorkspace: false })
     await guard.removeOwnerNetwork(OWNER)
   })
 
@@ -48,10 +52,47 @@ describe.skipIf(!dockerAvailable)('network guard', () => {
     expect((await sh(a, curlCode('https://example.com'))).stdout).toContain('200')
   })
 
-  it('a sandbox cannot reach the host', async () => {
-    expect((await sh(a, curlCode('http://host.docker.internal:55432'))).stdout).toContain('blocked')
-    const gateway = (await docker().getNetwork(a.handle.network!).inspect()).IPAM?.Config?.[0]?.Gateway ?? ''
-    expect((await sh(a, curlCode(`http://${gateway}:80`))).stdout).toContain('blocked')
+  it('a sandbox cannot reach a real listener on the host, while an unguarded container can (I7)', async () => {
+    const listener = http.createServer((_q, r) => r.end('reached'))
+    await new Promise<void>((r) => listener.listen(0, '0.0.0.0', r))
+    const port = (listener.address() as AddressInfo).port
+    try {
+      const probe = `curl -s -o /dev/null --max-time 5 -w '%{http_code}' http://host.docker.internal:${String(port)}/; echo " exit=$?"`
+      const guarded = (await sh(a, probe)).stdout
+      expect(guarded).toContain('exit=28')
+      const control = await runOnce('agentry/sandbox:1', ['sh', '-c', probe])
+      expect(control.output).toContain('200')
+    } finally {
+      listener.close()
+    }
+  })
+
+  it("a sandbox cannot reach a sibling's published envd port through the host (I7)", async () => {
+    const port = (await docker().getContainer(b.handle.containerId!).inspect()).NetworkSettings.Ports['49983/tcp']?.[0]?.HostPort
+    const probe = `curl -s -o /dev/null --max-time 5 -w '%{http_code}' http://host.docker.internal:${String(port)}/health; echo " exit=$?"`
+    expect((await sh(a, probe)).stdout).toContain('exit=28')
+  })
+
+  it('owner networks are small /24 subnets', async () => {
+    const net = await docker().getNetwork(a.handle.network!).inspect()
+    expect(net.IPAM?.Config?.[0]?.Subnet).toMatch(/\/24$/)
+  })
+
+  it("stopping or deleting a sandbox removes its own rules, and the owner's network goes with the last sandbox (I6)", async () => {
+    const rules = async (tag: string) => (await runOnce(GUARD_IMAGE, [`iptables -S DOCKER-USER; iptables -S INPUT`], undefined, { privileged: true, hostNet: true })).output.split('\n').filter((l) => l.includes(tag)).length
+    const offId = newId()
+    const offHandle = await backend.create(offId, OWNER, { network: false })
+    const tag = `agentry-c-${offHandle.containerId!.slice(0, 12)}`
+    expect(await rules(tag)).toBeGreaterThan(0)
+    await backend.stop(offHandle)
+    expect(await rules(tag)).toBe(0)
+    await backend.destroy(offId, offHandle, { keepWorkspace: false })
+    const owner = `test-net-${randomBytes(4).toString('hex')}`
+    const id = newId()
+    const h = await backend.create(id, owner, {})
+    await backend.destroy(id, h, { keepWorkspace: false })
+    await backend.releaseOwner!(owner)
+    await expect(docker().getNetwork(h.network!).inspect()).rejects.toThrow()
   })
 
   it('a sandbox cannot reach a sibling sandbox', async () => {

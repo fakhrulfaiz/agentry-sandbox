@@ -9,7 +9,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import http from 'node:http'
 import type { Backend } from '../backends/types.ts'
 import type { SandboxConfig } from '../config.ts'
-import { BackendUnavailableError, NotFoundError, type SandboxService } from '../sandboxes.ts'
+import { BackendUnavailableError, LimitError, NotFoundError, QuotaExceededError, type SandboxService } from '../sandboxes.ts'
 import type { SandboxRecord, Store, TemplateRecord, TemplateSpec } from '../store/types.ts'
 import { relay } from './relay.ts'
 
@@ -277,6 +277,8 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
         if (e instanceof HttpError) return fail(res, e.status, e.code, e.message)
         if (e instanceof NotFoundError) return fail(res, 404, 'not_found', e.message)
         if (e instanceof BackendUnavailableError) return fail(res, 503, 'backend_unavailable', e.message)
+        if (e instanceof QuotaExceededError) return fail(res, 429, 'quota_exceeded', e.message)
+        if (e instanceof LimitError) return fail(res, 400, 'invalid_request', e.message)
         const msg = e instanceof Error ? e.message : String(e)
         if (/sandbox/.test(url.pathname)) return fail(res, 409, 'sandbox_failed', msg)
         fail(res, 500, 'internal', msg)
