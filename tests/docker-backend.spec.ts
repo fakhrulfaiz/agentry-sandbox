@@ -94,6 +94,16 @@ describe.skipIf(!dockerAvailable)('docker backend', () => {
     expect(r.stdout).toContain('jq-')
   })
 
+  it('injects the DSH runtime into any glibc image, runnable by agent', async () => {
+    const cfg = config()
+    const backend = createDockerBackend(cfg, createPassthroughNetworkGuard())
+    const id = newId()
+    const handle = await backend.create(id, 'alice', { image: 'debian:bookworm-slim' })
+    const r = await shell(cfg, backend, id, handle, 'agent', 'M=/opt/agentry/dsh/manifest.json; /opt/agentry/dsh/node -e "const m=require(process.argv[1]); require(\'fs\').accessSync(m.helper); console.log(m.version, require(\'crypto\').createHash(\'sha256\').update(require(\'fs\').readFileSync(m.helper)).digest(\'hex\')===m.helperHash)" $M; touch /opt/agentry/dsh/x 2>/dev/null || echo read-only')
+    expect(r.stdout).toContain('0.2.2-rc.1 true')
+    expect(r.stdout).toContain('read-only')
+  })
+
   it('works with an image that lacks the agent user (alpine, apk)', async () => {
     const cfg = config()
     const backend = createDockerBackend(cfg, createPassthroughNetworkGuard())

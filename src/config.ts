@@ -34,6 +34,8 @@ export interface SandboxConfig {
   secret: string
   docker: { socketPath?: string; host?: string }
   envdImage: string
+  /** Image holding DSH's remote helper at /opt/agentry/dsh, injected into every sandbox; empty when `none`. */
+  dshRuntimeImage: string
   defaultImage: string
   idleStopMinutes: number
   startTimeoutMs: number
@@ -112,6 +114,7 @@ export function loadConfig(env: Env): SandboxConfig {
     secret,
     docker: host ? { host } : {},
     envdImage: env.AGENTRY_SANDBOX_ENVD_IMAGE?.trim() || 'agentry/envd:envd-v0.6.13',
+    dshRuntimeImage: env.AGENTRY_SANDBOX_DSH_RUNTIME_IMAGE?.trim() === 'none' ? '' : env.AGENTRY_SANDBOX_DSH_RUNTIME_IMAGE?.trim() || 'agentry/dsh-runtime:0.2.2-rc.1',
     defaultImage: env.AGENTRY_SANDBOX_DEFAULT_IMAGE?.trim() || 'agentry/sandbox:1',
     idleStopMinutes: integer(env, 'AGENTRY_SANDBOX_IDLE_MINUTES', 30),
     startTimeoutMs: integer(env, 'AGENTRY_SANDBOX_START_TIMEOUT_MS', 60_000),

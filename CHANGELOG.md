@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 2026-11-24: DSH runtime injection: `images/dsh-runtime` installs DeepSeek Harness's remote helper (`@deepseek-ai/dsh-ssh`, node-script launch) and PTC worker with Node under `/opt/agentry/dsh` (read-only, `manifest.json` with paths and SHA-256 digests); the Docker backend copies it into every sandbox like envd. `AGENTRY_SANDBOX_DSH_RUNTIME_IMAGE` (default `agentry/dsh-runtime:0.2.2-rc.1`, `none` disables). Needs a glibc image (Alpine gets the files but cannot run them).
 - 2026-11-25: Project created: configuration from the environment (`src/config.ts`), with named startup errors for missing or invalid values.
 - 2026-11-25: `agentry/envd:envd-v0.6.13` image (E2B envd built unmodified from the pinned commit, with its Apache-2.0 license) and `agentry/sandbox:1` default image (Debian, Node 24, pnpm, Python with the Office packages, `agent` user with passwordless sudo, `/workspace`). envd's API spec vendored in `third_party/envd` (`pnpm images:build`, `scripts/vendor-envd-spec.sh`).
 - 2026-11-25: Generated envd client (`src/envd/client.ts`, Connect-RPC `process`/`filesystem` plus `/health`, `/init`, `/files`), per-sandbox access tokens derived as HMAC-SHA256 of the sandbox id (`src/envd/token.ts`, never stored), and envd extraction from its image as a tar for any container (`src/backends/envd-binary.ts`). Verified against a live envd: process streaming with exit codes, file round-trip, and calls with a wrong token refused.

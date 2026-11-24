@@ -13,7 +13,7 @@ import { createEnvdClient, type EnvdClient } from '../envd/client.ts'
 import { runInEnvd, sq } from '../envd/run.ts'
 import { envdToken } from '../envd/token.ts'
 import type { TemplateSpec } from '../store/types.ts'
-import { envdArchive } from './envd-binary.ts'
+import { envdArchive, treeArchive } from './envd-binary.ts'
 import type { Availability, Backend, BackendHandle, NetworkGuard } from './types.ts'
 
 const ENVD_PORT = '49983/tcp'
@@ -223,6 +223,7 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
       })
       try {
         await container.putArchive(await envdArchive(client, config.envdImage), { path: '/' })
+        if (config.dshRuntimeImage) await container.putArchive(await treeArchive(client, config.dshRuntimeImage, '/opt/agentry/dsh'), { path: '/opt/agentry' })
         return await boot(id, { containerId: container.id, volume, network: net, provisioned: 'false' }, spec)
       } catch (e) {
         // Fail closed: nothing half-made stays behind, running or not.

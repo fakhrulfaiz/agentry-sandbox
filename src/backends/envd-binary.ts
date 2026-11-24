@@ -56,3 +56,34 @@ export async function envdArchive(docker: Docker, image: string): Promise<Buffer
   for await (const c of p as AsyncIterable<Buffer>) parts.push(c)
   return Buffer.concat(parts)
 }
+
+const trees = new Map<string, Promise<Buffer>>()
+
+async function readTree(docker: Docker, image: string, path: string): Promise<Buffer> {
+  const container = await docker.createContainer({ Image: image, Cmd: ['/none'] })
+  try {
+    const stream = (await container.getArchive({ path })) as NodeJS.ReadableStream
+    const parts: Buffer[] = []
+    for await (const c of stream as AsyncIterable<Buffer>) parts.push(c)
+    const tar = Buffer.concat(parts)
+    if (tar.length === 0) throw new Error(`${path} not found in ${image}`)
+    return tar
+  } finally {
+    await container.remove({ force: true })
+  }
+}
+
+/**
+ * The directory `path` of `image` as Docker's tar (entries rooted at its basename),
+ * cached per image, for `putArchive(tar, { path: dirname(path) })`.
+ */
+export function treeArchive(docker: Docker, image: string, path: string): Promise<Buffer> {
+  const key = `${image}\0${path}`
+  let p = trees.get(key)
+  if (!p) {
+    p = readTree(docker, image, path)
+    p.catch(() => trees.delete(key))
+    trees.set(key, p)
+  }
+  return p
+}

@@ -15,6 +15,7 @@ describe('loadConfig', () => {
     expect(c.resources).toMatchObject({ cpus: 2, pids: 4096 })
     expect(c.startTimeoutMs).toBe(60000)
     expect(c.envdImage).toBe('agentry/envd:envd-v0.6.13')
+    expect(c.dshRuntimeImage).toBe('agentry/dsh-runtime:0.2.2-rc.1')
     expect(c.defaultImage).toBe('agentry/sandbox:1')
     expect(c.egress).toBe(true)
     expect(c.apiKeyHashes).toEqual([KEY])
