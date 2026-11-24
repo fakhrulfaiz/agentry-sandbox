@@ -266,7 +266,18 @@ export function createSandboxService(deps: { store: Store; backend: Backend; con
         lastUsedAt: null,
       }
       await store.sandboxes.insert(record)
-      return locked(record.id, () => build(record))
+      // A create that fails leaves nothing behind: the caller gets the reason and never learned the id,
+      // so a kept failed record would only count against the owner's limits.
+      return locked(record.id, async () => {
+        try {
+          return await build(record)
+        } catch (e) {
+          // The backend cleans up a create it could not finish; this also covers one that died half-way.
+          await backend.destroy(record.id, {}, { keepWorkspace: false }).catch(() => {})
+          await store.sandboxes.delete(record.id, owner).catch(() => {})
+          throw e
+        }
+      })
     },
 
     list: (owner) => store.sandboxes.list(owner),

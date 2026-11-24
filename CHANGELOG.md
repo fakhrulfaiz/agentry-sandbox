@@ -3,6 +3,11 @@
 
 
 
+
+## 2026-11-25 — failed creates leave nothing behind
+
+- A create whose setup fails (or that the backend cannot finish) now removes its record and asks the backend to clean up, instead of keeping a `failed` sandbox the caller never learned the id of. The reason still comes back to the caller; the sandbox no longer counts against the owner's limits.
+
 ## 2026-11-24 — admin page
 
 - `/admin`: a single HTML page for operators, signed in with an admin key (`AGENTRY_SANDBOX_ADMIN_KEYS`, separate from the API keys; the key stays in the browser tab's session storage). It shows the backend, the standard image's software and the defaults; every user's sandboxes with start, stop and delete; and the limits, editable live including per-user overrides. Strict content security policy, no external resources, light and dark.
