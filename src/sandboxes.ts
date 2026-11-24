@@ -198,6 +198,32 @@ export function createSandboxService(deps: { store: Store; backend: Backend; con
     }
   }
 
+  let sweeping: Promise<string[]> | undefined
+  const sweepOnce = async (): Promise<string[]> => {
+    const stopped: string[] = []
+    for (const snapshot of await store.sandboxes.listAll()) {
+      if (snapshot.state !== 'running') continue
+      await locked(snapshot.id, async () => {
+        const r = await store.sandboxes.getAny(snapshot.id)
+        if (!r || r.state !== 'running') return
+        const last = r.lastUsedAt ?? r.startedAt ?? r.createdAt
+        if (!inUse.has(r.id) && last <= now() - config.idleStopMinutes * 60_000) {
+          try {
+            await call(() => backend.stop(r.handle))
+            await save(r, { state: 'stopped' })
+            stopped.push(r.id)
+          } catch {
+            // Leave it running; the next sweep tries again.
+          }
+          return
+        }
+        // Still running: keep its network rules in place (a host firewall reload drops them).
+        if (backend.maintain) await backend.maintain(r.id, r.handle, r.template).catch(() => {})
+      })
+    }
+    return stopped
+  }
+
   return {
     async create(owner, input) {
       let template = input.template ?? {}
@@ -289,30 +315,12 @@ export function createSandboxService(deps: { store: Store; backend: Backend; con
       }
     },
 
-    async sweepIdle() {
-      const stopped: string[] = []
-      for (const snapshot of await store.sandboxes.listAll()) {
-        if (snapshot.state !== 'running') continue
-        await locked(snapshot.id, async () => {
-          const r = await store.sandboxes.getAny(snapshot.id)
-          if (!r || r.state !== 'running') return
-          const last = r.lastUsedAt ?? r.startedAt ?? r.createdAt
-          if (!inUse.has(r.id) && last <= now() - config.idleStopMinutes * 60_000) {
-            try {
-              await call(() => backend.stop(r.handle))
-              await save(r, { state: 'stopped' })
-              stopped.push(r.id)
-            } catch {
-              // Leave it running; the next sweep tries again.
-            }
-            return
-          }
-          // Still running: keep its network rules in place (a host firewall reload drops them).
-          if (backend.maintain) await backend.maintain(r.id, r.handle, r.template).catch(() => {})
-        })
-      }
-      return stopped
+    sweepIdle() {
+      // One sweep at a time: a slow sweep and the next timer tick never stop the same sandbox twice.
+      sweeping ??= sweepOnce().finally(() => { sweeping = undefined })
+      return sweeping
     },
+
 
     async reconcile() {
       const managed = await call(() => backend.listManaged())

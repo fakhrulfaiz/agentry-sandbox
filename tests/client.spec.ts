@@ -34,7 +34,7 @@ describe('sandbox API client', () => {
 
   it('rejects a workspace path that is not a clean absolute path', async () => {
     const api = createSandboxApi({ url: svc.url, key: svc.key, owner: 'alice' })
-    for (const p of ['relative/dir', '/a/../b', '/a b', '/']) await expect(api.create({ name: 'x', workspace_path: p })).rejects.toMatchObject({ status: 400 })
+    for (const p of ['relative/dir', '/a/../b', '/a b', '/', '/opt/agentry', '/opt/agentry/dsh', '/proc/x', '/etc']) await expect(api.create({ name: 'x', workspace_path: p })).rejects.toMatchObject({ status: 400 })
   })
 
   it('an unreachable service is a SandboxApiError with code unreachable', async () => {

@@ -31,7 +31,12 @@ export async function relay(service: SandboxService, owner: string, id: string, 
   }
   headers['x-access-token'] = token
   const user = req.headers['x-envd-user']
-  if (typeof user === 'string' && ENVD_USER.test(user)) headers.authorization = `Basic ${Buffer.from(`${user}:`).toString('base64')}`
+  if (user !== undefined && (typeof user !== 'string' || !ENVD_USER.test(user))) {
+    // Never fall back to envd's default user silently.
+    res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { code: 'invalid_request', message: 'X-Envd-User is not a valid user name' } }))
+    return
+  }
+  if (typeof user === 'string') headers.authorization = `Basic ${Buffer.from(`${user}:`).toString('base64')}`
 
   await new Promise<void>((resolve) => {
     const upstream = http.request(target, { method: req.method, headers }, (up) => {

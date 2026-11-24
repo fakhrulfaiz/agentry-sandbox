@@ -1,5 +1,13 @@
 # Changelog
 
+
+## 2026-11-24 — small fixes
+
+- `workspace_path` may not sit inside a directory the sandbox image needs (`/opt/agentry`, `/proc`, `/sys`, `/dev`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/run`, `/var/run`, `/var/lib`): 400.
+- The egress guard also blocks `0.0.0.0/8`, `192.0.0.0/24`, `198.18.0.0/15`, multicast `224.0.0.0/4`, reserved `240.0.0.0/4` and the Azure host address `168.63.129.16`.
+- An invalid `X-Envd-User` on the envd relay answers 400 instead of silently using envd's default user.
+- Idle sweeps never overlap: a sweep that is still running is shared with the next tick.
+
 ## Unreleased
 
 - 2026-11-24: DSH runtime injection: `images/dsh-runtime` installs DeepSeek Harness's remote helper (`@deepseek-ai/dsh-ssh`, node-script launch) and PTC worker with Node under `/opt/agentry/dsh` (read-only, `manifest.json` with paths and SHA-256 digests); the Docker backend copies it into every sandbox like envd. `AGENTRY_SANDBOX_DSH_RUNTIME_IMAGE` (default `agentry/dsh-runtime:0.2.2-rc.1`, `none` disables). Needs a glibc image (Alpine gets the files but cannot run them).
