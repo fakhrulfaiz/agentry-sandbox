@@ -94,6 +94,16 @@ describe.skipIf(!dockerAvailable)('docker backend', () => {
     expect(r.stdout).toContain('jq-')
   })
 
+  it('injects the DSH runtime into any glibc image, runnable by agent', async () => {
+    const cfg = config()
+    const backend = createDockerBackend(cfg, createPassthroughNetworkGuard())
+    const id = newId()
+    const handle = await backend.create(id, 'alice', { image: 'debian:bookworm-slim' })
+    const r = await shell(cfg, backend, id, handle, 'agent', 'M=/opt/agentry/dsh/manifest.json; /opt/agentry/dsh/node -e "const m=require(process.argv[1]); require(\'fs\').accessSync(m.helper); console.log(m.version, require(\'crypto\').createHash(\'sha256\').update(require(\'fs\').readFileSync(m.helper)).digest(\'hex\')===m.helperHash)" $M; touch /opt/agentry/dsh/x 2>/dev/null || echo read-only')
+    expect(r.stdout).toContain('0.2.2-rc.1 true')
+    expect(r.stdout).toContain('read-only')
+  })
+
   it('works with an image that lacks the agent user (alpine, apk)', async () => {
     const cfg = config()
     const backend = createDockerBackend(cfg, createPassthroughNetworkGuard())
@@ -145,5 +155,17 @@ describe.skipIf(!dockerAvailable)('docker backend', () => {
     const bad = createDockerBackend({ ...cfg, startTimeoutMs: 2_000, envdReach: 'ip' }, createPassthroughNetworkGuard())
     await expect(bad.start(id, handle, {})).rejects.toThrow(/envd/)
     expect(await backend.status(handle)).toBe('stopped')
+  })
+
+  it('mounts the workspace at a custom workspace path, owned by agent', async () => {
+    const cfg = config()
+    const backend = createDockerBackend(cfg, createPassthroughNetworkGuard())
+    const id = newId()
+    const handle = await backend.create(id, 'alice', { workspacePath: '/home/mffaiz/agentry-workspaces/dev/sandbox-x' })
+    const { baseUrl } = await backend.endpoint(handle)
+    const r = await runInEnvd(createEnvdClient({ baseUrl, accessToken: envdToken(cfg.secret, id) }), 'agent', 'pwd; stat -c %U .; touch ok && echo writable')
+    expect(r.stdout).toContain('/home/mffaiz/agentry-workspaces/dev/sandbox-x')
+    expect(r.stdout).toContain('agent')
+    expect(r.stdout).toContain('writable')
   })
 })

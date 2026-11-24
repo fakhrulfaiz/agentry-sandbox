@@ -49,7 +49,7 @@ export function createEnvdClient(opts: EnvdClientOptions): EnvdClient {
     req.header.set('X-Access-Token', opts.accessToken)
     return next(req)
   }
-  const transport = createConnectTransport({ httpVersion: '1.1', baseUrl, interceptors: [token] })
+  const transport = createConnectTransport({ httpVersion: '1.1', baseUrl, useBinaryFormat: false, interceptors: [token] })
   const headers = (user?: string): Record<string, string> => ({ ...extra, 'X-Access-Token': opts.accessToken, ...(user ? userHeader(user) : {}) })
   const fail = async (what: string, res: Response): Promise<never> => {
     throw new Error(`envd ${what} failed: ${String(res.status)} ${(await res.text().catch(() => '')).slice(0, 200)}`)
@@ -58,7 +58,7 @@ export function createEnvdClient(opts: EnvdClientOptions): EnvdClient {
   return {
     async health(signal) {
       try {
-        const res = await doFetch(`${baseUrl}/health`, { signal })
+        const res = await doFetch(`${baseUrl}/health`, signal ? { signal } : {})
         return res.status === 204 || res.ok
       } catch {
         return false
