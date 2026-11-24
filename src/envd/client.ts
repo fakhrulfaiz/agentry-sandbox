@@ -29,15 +29,28 @@ export interface EnvdClient {
 
 const basic = (user: string) => `Basic ${Buffer.from(`${user}:`).toString('base64')}`
 
-export function createEnvdClient(opts: { baseUrl: string; accessToken: string; fetch?: typeof fetch }): EnvdClient {
+export interface EnvdClientOptions {
+  baseUrl: string
+  accessToken: string
+  fetch?: typeof fetch
+  /** Extra headers on every request (e.g. the service key and owner when calling through the relay). */
+  headers?: Record<string, string>
+  /** How a call's user reaches envd: Basic auth (direct) or `X-Envd-User` (through the Agentry Sandbox relay). */
+  userVia?: 'basic' | 'header'
+}
+
+export function createEnvdClient(opts: EnvdClientOptions): EnvdClient {
   const baseUrl = opts.baseUrl.replace(/\/+$/, '')
   const doFetch = opts.fetch ?? fetch
+  const extra = opts.headers ?? {}
+  const userHeader = (user: string): Record<string, string> => (opts.userVia === 'header' ? { 'X-Envd-User': user } : { Authorization: basic(user) })
   const token: Interceptor = (next) => (req) => {
+    for (const [k, v] of Object.entries(extra)) req.header.set(k, v)
     req.header.set('X-Access-Token', opts.accessToken)
     return next(req)
   }
   const transport = createConnectTransport({ httpVersion: '1.1', baseUrl, interceptors: [token] })
-  const headers = (user?: string): Record<string, string> => ({ 'X-Access-Token': opts.accessToken, ...(user ? { Authorization: basic(user) } : {}) })
+  const headers = (user?: string): Record<string, string> => ({ ...extra, 'X-Access-Token': opts.accessToken, ...(user ? userHeader(user) : {}) })
   const fail = async (what: string, res: Response): Promise<never> => {
     throw new Error(`envd ${what} failed: ${String(res.status)} ${(await res.text().catch(() => '')).slice(0, 200)}`)
   }
@@ -68,6 +81,6 @@ export function createEnvdClient(opts: { baseUrl: string; accessToken: string; f
       const res = await doFetch(filesUrl(path, user), { method: 'POST', headers: headers(user), body: form })
       if (!res.ok) await fail(`write ${path}`, res)
     },
-    userHeaders: (user) => ({ Authorization: basic(user) }),
+    userHeaders: userHeader,
   }
 }

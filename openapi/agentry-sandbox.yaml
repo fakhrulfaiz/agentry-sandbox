@@ -1,0 +1,296 @@
+openapi: 3.1.0
+info:
+  title: Agentry Sandbox
+  version: 0.1.0
+  description: >-
+    Hardened sandboxes on demand. Every route except /v1/health needs
+    `Authorization: Bearer <key>` and `X-Agentry-Owner`. Records are scoped to
+    that owner: another owner's id answers 404 like a missing one. Times are
+    epoch seconds.
+servers:
+  - url: http://127.0.0.1:3090
+security:
+  - bearer: []
+paths:
+  /v1/health:
+    get:
+      summary: Liveness
+      security: []
+      responses:
+        "200":
+          description: The service is up.
+          content:
+            application/json:
+              schema: { type: object, properties: { ok: { const: true } } }
+  /v1/backends:
+    get:
+      summary: Backends and their availability
+      parameters: [{ $ref: "#/components/parameters/Owner" }]
+      responses:
+        "200":
+          description: One entry per backend.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { const: list }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Backend" }
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/sandboxes:
+    post:
+      summary: Create a sandbox (and start it)
+      parameters: [{ $ref: "#/components/parameters/Owner" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                template_id: { type: string, description: "A stored template; `template` fields override it." }
+                template: { $ref: "#/components/schemas/TemplateSpec" }
+      responses:
+        "201": { $ref: "#/components/responses/Sandbox" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    get:
+      summary: List sandboxes
+      parameters: [{ $ref: "#/components/parameters/Owner" }]
+      responses:
+        "200":
+          description: The owner's sandboxes, oldest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { const: list }
+                  data: { type: array, items: { $ref: "#/components/schemas/Sandbox" } }
+  /v1/sandboxes/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Owner" }]
+    get:
+      summary: Get a sandbox
+      responses:
+        "200": { $ref: "#/components/responses/Sandbox" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a sandbox and its workspace
+      responses:
+        "204": { description: Deleted. }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/sandboxes/{id}/start:
+    parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Owner" }]
+    post:
+      summary: Start a stopped sandbox
+      responses:
+        "200": { $ref: "#/components/responses/Sandbox" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /v1/sandboxes/{id}/stop:
+    parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Owner" }]
+    post:
+      summary: Stop a sandbox (installed software and files are kept)
+      responses:
+        "200": { $ref: "#/components/responses/Sandbox" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/sandboxes/{id}/reset:
+    parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Owner" }]
+    post:
+      summary: Rebuild a sandbox from its template
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                keep_workspace: { type: boolean, default: true }
+      responses:
+        "200": { $ref: "#/components/responses/Sandbox" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /v1/sandboxes/{id}/envd/{path}:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+      - { $ref: "#/components/parameters/Owner" }
+      - name: path
+        in: path
+        required: true
+        description: An envd path (`process.Process/Start`, `filesystem.Filesystem/Stat`, `files`, `health`…), relayed with the sandbox's access token. Any method; GET and POST are listed.
+        schema: { type: string }
+      - name: X-Envd-User
+        in: header
+        required: false
+        description: The Unix user envd runs the call as (sent to envd as Basic auth).
+        schema: { type: string }
+    get:
+      summary: Relay a call to the sandbox's envd
+      responses:
+        default: { description: "envd's response, streamed." }
+    post:
+      summary: Relay a call to the sandbox's envd
+      responses:
+        default: { description: "envd's response, streamed." }
+  /v1/templates:
+    post:
+      summary: Create a template
+      parameters: [{ $ref: "#/components/parameters/Owner" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                spec: { $ref: "#/components/schemas/TemplateSpec" }
+      responses:
+        "201": { $ref: "#/components/responses/Template" }
+        "400": { $ref: "#/components/responses/Error" }
+    get:
+      summary: List templates
+      parameters: [{ $ref: "#/components/parameters/Owner" }]
+      responses:
+        "200":
+          description: The owner's templates.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { const: list }
+                  data: { type: array, items: { $ref: "#/components/schemas/Template" } }
+  /v1/templates/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Owner" }]
+    get:
+      summary: Get a template
+      responses:
+        "200": { $ref: "#/components/responses/Template" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      summary: Update a template (existing sandboxes keep their snapshot)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                spec: { $ref: "#/components/schemas/TemplateSpec" }
+      responses:
+        "200": { $ref: "#/components/responses/Template" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a template
+      responses:
+        "204": { description: Deleted. }
+        "404": { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer }
+  parameters:
+    Owner:
+      name: X-Agentry-Owner
+      in: header
+      required: true
+      schema: { type: string }
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    Sandbox:
+      description: A sandbox.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Sandbox" }
+    Template:
+      description: A template.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Template" }
+    Error:
+      description: "`unauthorized` 401, `owner_required` 400, `invalid_request` 400, `not_found` 404, `sandbox_failed` 409, `backend_unavailable` 503."
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                required: [code, message]
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+  schemas:
+    TemplateSpec:
+      type: object
+      properties:
+        image: { type: string, description: "Any Linux image; the default sandbox image when absent." }
+        packages: { type: array, items: { type: string }, description: Installed with apt-get or apk on first start. }
+        setup_commands: { type: array, items: { type: string }, description: "Run as `agent` in /workspace on first start." }
+        env: { type: object, additionalProperties: { type: string } }
+        network: { type: boolean, default: true, description: "false: no outbound connections." }
+        files:
+          type: array
+          items:
+            type: object
+            required: [path, content]
+            properties:
+              path: { type: string, description: Relative paths are under /workspace. }
+              content: { type: string }
+        resources:
+          type: object
+          properties:
+            cpus: { type: number, minimum: 0.1, maximum: 64 }
+            memory_mb: { type: integer, minimum: 128, maximum: 262144 }
+    Sandbox:
+      type: object
+      required: [id, object, name, backend, state, image, template, created_at]
+      properties:
+        id: { type: string, pattern: "^sbx_[0-9a-f]{32}$" }
+        object: { const: sandbox }
+        name: { type: string }
+        backend: { type: string }
+        state: { enum: [provisioning, running, stopped, failed, deleting] }
+        template_id: { type: [string, "null"] }
+        image: { type: string }
+        template: { $ref: "#/components/schemas/TemplateSpec" }
+        error: { type: [string, "null"] }
+        created_at: { type: integer }
+        started_at: { type: [integer, "null"] }
+        last_used_at: { type: [integer, "null"] }
+    Template:
+      type: object
+      required: [id, object, name, spec, created_at, updated_at]
+      properties:
+        id: { type: string, pattern: "^tpl_[0-9a-f]{32}$" }
+        object: { const: template }
+        name: { type: string }
+        spec: { $ref: "#/components/schemas/TemplateSpec" }
+        created_at: { type: integer }
+        updated_at: { type: integer }
+    Backend:
+      type: object
+      properties:
+        kind: { type: string }
+        available: { type: boolean }
+        version: { type: string }
+        reason: { type: string }
+        capabilities:
+          type: object
+          properties:
+            persistent: { type: boolean }
+            network: { type: boolean }
+            resources: { type: boolean }
+            templateFields: { type: array, items: { type: string } }
