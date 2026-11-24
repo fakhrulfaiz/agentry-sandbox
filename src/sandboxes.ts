@@ -68,6 +68,18 @@ export interface SandboxService {
   beginUse(id: string): () => void
   sweepIdle(): Promise<string[]>
   reconcile(): Promise<{ adopted: string[]; missing: string[]; unknown: string[] }>
+  /** The limits in force: the environment's defaults with any saved overrides applied. */
+  limits(): Limits
+  /** The saved overrides (what the admin changed), or an empty object. */
+  limitOverrides(): Partial<Limits>
+  /** Saves overrides (validated, merged over the environment's defaults) and applies them at once; `null` clears them. */
+  setLimits(overrides: Partial<Limits> | null): Promise<Limits>
+  /** Reads saved overrides from the store; call once at startup. */
+  loadSettings(): Promise<void>
+  /** Every owner's sandboxes, newest first (admin). */
+  listEverything(): Promise<SandboxRecord[]>
+  /** The owner of a sandbox (admin), or undefined when there is none. */
+  ownerOf(id: string): Promise<string | undefined>
   /** Test hook: replaces the limits in place. */
   setLimitsForTest?(limits: Partial<Limits>): void
 }
@@ -87,6 +99,8 @@ export function createSandboxService(deps: { store: Store; backend: Backend; con
   const { store, backend, config } = deps
   const now = deps.now ?? Date.now
   let limits: Limits = { ...config.limits }
+  let overrides: Partial<Limits> = {}
+  const LIMITS_KEY = 'limits'
   const locks = new Map<string, Promise<unknown>>()
   const inUse = new Map<string, number>()
   const creations = new Map<string, number[]>()
@@ -347,8 +361,83 @@ export function createSandboxService(deps: { store: Store; backend: Backend; con
       return { adopted, missing, unknown }
     },
 
+    limits() {
+      return structuredClone(limits)
+    },
+
+    limitOverrides() {
+      return structuredClone(overrides)
+    },
+
+    async setLimits(next) {
+      const clean = next === null ? {} : validateLimits(next)
+      await store.settings.set(LIMITS_KEY, Object.keys(clean).length > 0 ? clean : undefined)
+      overrides = clean
+      limits = { ...config.limits, ...clean, owners: { ...config.limits.owners, ...(clean.owners ?? {}) } }
+      return structuredClone(limits)
+    },
+
+    async loadSettings() {
+      const saved = await store.settings.get(LIMITS_KEY)
+      if (saved === undefined) return
+      try {
+        overrides = validateLimits(saved)
+        limits = { ...config.limits, ...overrides, owners: { ...config.limits.owners, ...(overrides.owners ?? {}) } }
+      } catch {
+        // A saved value that no longer validates is ignored; the environment's limits stay in force.
+      }
+    },
+
+    async listEverything() {
+      return (await store.sandboxes.listAll()).sort((a, b) => b.createdAt - a.createdAt)
+    },
+
+    async ownerOf(id) {
+      return (await store.sandboxes.getAny(id))?.owner
+    },
+
     setLimitsForTest(next) {
       limits = { ...limits, ...next }
     },
   }
+}
+
+const COUNT_KEYS = ['maxPerOwner', 'maxRunningPerOwner', 'maxTotal', 'maxRunningTotal', 'maxCreatesPerHour'] as const
+const OWNER_KEYS = ['maxPerOwner', 'maxRunningPerOwner', 'maxCreatesPerHour'] as const
+
+/** Checks limit overrides from the admin page; throws LimitError naming the bad field. Unknown keys are refused. */
+export function validateLimits(raw: unknown): Partial<Limits> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new LimitError('limits must be an object')
+  const r = raw as Record<string, unknown>
+  const out: Partial<Limits> = {}
+  const count = (key: string, v: unknown): number => {
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 100_000) throw new LimitError(`${key} must be a whole number from 0 to 100000`)
+    return v
+  }
+  for (const key of Object.keys(r)) {
+    const v = r[key]
+    if ((COUNT_KEYS as readonly string[]).includes(key)) out[key as (typeof COUNT_KEYS)[number]] = count(key, v)
+    else if (key === 'maxCpus') {
+      if (typeof v !== 'number' || !(v >= 0.1 && v <= 256)) throw new LimitError('maxCpus must be a number from 0.1 to 256')
+      out.maxCpus = v
+    } else if (key === 'maxMemoryMb') {
+      if (typeof v !== 'number' || !Number.isInteger(v) || v < 128 || v > 1_048_576) throw new LimitError('maxMemoryMb must be a whole number from 128 to 1048576')
+      out.maxMemoryMb = v
+    } else if (key === 'owners') {
+      if (!v || typeof v !== 'object' || Array.isArray(v)) throw new LimitError('owners must be an object of owner to limits')
+      const owners: Limits['owners'] = {}
+      for (const [owner, o] of Object.entries(v as Record<string, unknown>)) {
+        if (!owner.trim() || owner.length > 200) throw new LimitError('owner names must be 1-200 characters')
+        if (!o || typeof o !== 'object' || Array.isArray(o)) throw new LimitError(`owners.${owner} must be an object`)
+        const entry: Limits['owners'][string] = {}
+        for (const [k, n] of Object.entries(o as Record<string, unknown>)) {
+          if (!(OWNER_KEYS as readonly string[]).includes(k)) throw new LimitError(`owners.${owner}.${k} is not a per-owner limit`)
+          entry[k as (typeof OWNER_KEYS)[number]] = count(`owners.${owner}.${k}`, n)
+        }
+        owners[owner] = entry
+      }
+      out.owners = owners
+    } else throw new LimitError(`${key} is not a limit`)
+  }
+  return out
 }

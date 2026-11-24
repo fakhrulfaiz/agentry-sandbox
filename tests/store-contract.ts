@@ -60,6 +60,16 @@ export function storeContract(name: string, make: () => Promise<Store>) {
       expect((await store.sandboxes.list('alice')).map((r) => r.id)).toEqual([b.id, a.id])
     })
 
+    it('settings round-trip as JSON and can be removed', async () => {
+      expect(await store.settings.get('limits')).toBeUndefined()
+      await store.settings.set('limits', { maxPerOwner: 9, owners: { bob: { maxPerOwner: 2 } } })
+      expect(await store.settings.get('limits')).toEqual({ maxPerOwner: 9, owners: { bob: { maxPerOwner: 2 } } })
+      await store.settings.set('limits', { maxTotal: 3 })
+      expect(await store.settings.get('limits')).toEqual({ maxTotal: 3 })
+      await store.settings.set('limits', undefined)
+      expect(await store.settings.get('limits')).toBeUndefined()
+    })
+
     it('listAll returns every owner', async () => {
       const a = sandbox()
       const b = sandbox({ owner: 'bob' })

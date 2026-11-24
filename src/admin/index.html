@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandbox admin</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #111827; --muted: #5b6474; --line: #e3e6eb;
+  --accent: #2563eb; --accent-ink: #ffffff; --ok: #15803d; --warn: #b45309; --bad: #b91c1c; --soft: #eef2f8;
+  --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #14171c; --panel: #1b1f26; --ink: #e7eaef; --muted: #9aa3b2; --line: #2b313b; --accent: #5b8ef5; --soft: #222833; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Inter, sans-serif; }
+header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: -0.01em; white-space: nowrap; }
+header button, .pill { white-space: nowrap; }
+header .grow { flex: 1; }
+main { max-width: 1120px; margin: 0 auto; padding: 24px 16px 64px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px; }
+main > * { min-width: 0; }
+h2 { font-size: 18px; margin: 0 0 4px; letter-spacing: -0.01em; }
+.lede { color: var(--muted); margin: 0 0 14px; font-size: 14px; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+button { font: inherit; font-size: 14px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 6px 12px; cursor: pointer; }
+button:hover { background: var(--soft); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+button.primary:hover { filter: brightness(1.08); }
+button.danger { color: var(--bad); }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input, select { font: inherit; font-size: 14px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; }
+input[type=number] { width: 110px; font-variant-numeric: tabular-nums; }
+.pill { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--muted); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.running, .dot.ok { background: var(--ok); } .dot.stopped { background: var(--muted); } .dot.provisioning, .dot.deleting { background: var(--warn); } .dot.failed, .dot.bad { background: var(--bad); }
+.mono { font-family: var(--mono); font-size: 13px; }
+.muted { color: var(--muted); }
+.banner { border-radius: 8px; padding: 10px 14px; font-size: 14px; border: 1px solid; }
+.banner.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); background: color-mix(in srgb, var(--bad) 8%, transparent); }
+.banner.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: color-mix(in srgb, var(--ok) 8%, transparent); }
+
+/* Sign in */
+#signin { max-width: 420px; margin: 12vh auto; }
+#signin form { display: grid; gap: 12px; }
+#signin input { width: 100%; }
+
+/* Overview: the counts are the one big thing on the page. */
+.counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.count { background: var(--panel); padding: 14px 16px; }
+.count b { display: block; font-size: 30px; line-height: 1.1; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.count span { font-size: 13px; color: var(--muted); }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 24px; margin-top: 16px; font-size: 14px; }
+.facts dt { color: var(--muted); font-size: 13px; }
+.facts dd { margin: 0; }
+
+/* Sandboxes */
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+.toolbar .grow { flex: 1; }
+.table-wrap { overflow-x: auto; max-width: 100%; }
+#filter { flex: 1 1 260px; min-width: 0; max-width: 360px; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { text-align: left; font-weight: 550; color: var(--muted); font-size: 13px; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
+td.actions { white-space: nowrap; text-align: right; }
+td.actions button { padding: 4px 10px; font-size: 13px; margin-left: 4px; }
+.empty { color: var(--muted); padding: 18px 10px; }
+
+/* Limits */
+.limits { display: grid; gap: 0; }
+.limit { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.limit:last-child { border-bottom: 0; }
+.limit label { font-weight: 550; }
+.limit .help { color: var(--muted); font-size: 13px; grid-column: 1; }
+.limit .field { grid-row: 1 / span 2; grid-column: 2; display: flex; align-items: center; gap: 10px; }
+.limit .changed { font-size: 12px; color: var(--accent); }
+.owners { margin-top: 18px; }
+.owners h3 { font-size: 15px; margin: 0 0 4px; }
+.owners td input[type=text] { width: 100%; min-width: 140px; }
+.savebar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 18px; }
+.savebar .grow { flex: 1; }
+@media (max-width: 640px) {
+  header { padding: 12px 16px; }
+  section { padding: 16px; }
+  .limit { grid-template-columns: 1fr; }
+  .limit .field { grid-row: auto; grid-column: 1; }
+}
+@media (prefers-reduced-motion: no-preference) { button { transition: background-color .12s; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agentry Sandbox</h1>
+  <span class="pill" id="health" hidden><span class="dot" id="health-dot"></span><span id="health-text"></span></span>
+  <span class="grow"></span>
+  <button id="signout" hidden>Sign out</button>
+</header>
+
+<div id="signin" hidden>
+  <section>
+    <h2>Sign in</h2>
+    <p class="lede">Use an admin key from <span class="mono">AGENTRY_SANDBOX_ADMIN_KEYS</span>. It stays in this browser tab only and is cleared when you close it.</p>
+    <form id="signin-form">
+      <input id="key" type="password" autocomplete="off" placeholder="Admin key" aria-label="Admin key" required>
+      <div id="signin-error" class="banner bad" hidden></div>
+      <button class="primary" type="submit">Sign in</button>
+    </form>
+  </section>
+</div>
+
+<main id="app" hidden>
+  <div id="error" class="banner bad" role="alert" hidden></div>
+
+  <section aria-labelledby="overview-h">
+    <h2 id="overview-h">Overview</h2>
+    <p class="lede">What the service is running now. Refreshes every 5 seconds.</p>
+    <div class="counts" id="counts"></div>
+    <dl class="facts" id="facts"></dl>
+  </section>
+
+  <section aria-labelledby="sandboxes-h">
+    <h2 id="sandboxes-h">Sandboxes</h2>
+    <p class="lede">Every user's sandboxes. Stopping keeps files and software; deleting removes the sandbox and its files.</p>
+    <div class="toolbar">
+      <input id="filter" type="search" placeholder="Filter by name, user or image" aria-label="Filter sandboxes">
+      <select id="state-filter" aria-label="Filter by state">
+        <option value="">All states</option><option>running</option><option>stopped</option><option>provisioning</option><option>failed</option><option>deleting</option>
+      </select>
+      <span class="grow"></span>
+      <span class="muted" id="shown"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>User</th><th>State</th><th>Image</th><th>Last used</th><th>Created</th><th><span class="muted">Actions</span></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="limits-h">
+    <h2 id="limits-h">Limits</h2>
+    <p class="lede">Changes apply at once, to new requests, and survive restarts. Reset returns every limit to the service's environment settings.</p>
+    <div class="limits" id="limits"></div>
+    <div class="owners">
+      <h3>Per-user limits</h3>
+      <p class="lede">Give one user more (or less) than everyone else. Empty fields use the limit above.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>User</th><th>Sandboxes</th><th>Running at once</th><th>Creates per hour</th><th></th></tr></thead>
+          <tbody id="owner-rows"></tbody>
+        </table>
+      </div>
+      <button id="add-owner" style="margin-top:10px">Add a user</button>
+    </div>
+    <div class="savebar">
+      <span id="limits-status" class="muted"></span>
+      <span class="grow"></span>
+      <button id="reset-limits">Reset to defaults</button>
+      <button class="primary" id="save-limits">Save limits</button>
+    </div>
+  </section>
+</main>
+
+<script>
+'use strict'
+const KEY = 'agentry-sandbox-admin-key'
+const $ = (id) => document.getElementById(id)
+const store = { get() { try { return sessionStorage.getItem(KEY) } catch { return null } }, set(v) { try { v ? sessionStorage.setItem(KEY, v) : sessionStorage.removeItem(KEY) } catch {} } }
+
+const LIMITS = [
+  ['maxPerOwner', 'Sandboxes per user', 'Running or stopped, per user.'],
+  ['maxRunningPerOwner', 'Running at once per user', 'Starting another one past this is refused until one stops.'],
+  ['maxTotal', 'Sandboxes on the service', 'Across every user.'],
+  ['maxRunningTotal', 'Running at once on the service', 'Across every user; protects this machine.'],
+  ['maxCreatesPerHour', 'Creates per hour per user', 'Creates plus resets in any rolling hour; stops a runaway agent.'],
+  ['maxCpus', 'Most CPUs a template may ask for', 'A template asking for more is refused.', 0.1],
+  ['maxMemoryMb', 'Most memory a template may ask for (MB)', 'A template asking for more is refused.'],
+]
+const OWNER_KEYS = ['maxPerOwner', 'maxRunningPerOwner', 'maxCreatesPerHour']
+
+let current = null // { limits, defaults, overrides }
+let timer = null
+
+async function call(method, path, body) {
+  const res = await fetch(path, { method, headers: { authorization: `Bearer ${store.get()}`, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined })
+  if (res.status === 401) { signOut('That admin key was not accepted.'); throw new Error('signed out') }
+  const data = res.headers.get('content-type')?.includes('json') ? await res.json() : null
+  if (!res.ok) throw new Error(data?.error?.message ?? `${method} ${path} failed (${res.status})`)
+  return data
+}
+
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag)
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') node.className = v
+    else if (k.startsWith('on')) node.addEventListener(k.slice(2), v)
+    else if (v !== undefined && v !== null && v !== false) node.setAttribute(k, v === true ? '' : v)
+  }
+  for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) node.append(c instanceof Node ? c : document.createTextNode(String(c)))
+  return node
+}
+
+const ago = (s) => {
+  if (!s) return 'Never'
+  const m = Math.floor((Date.now() / 1000 - s) / 60)
+  if (m < 1) return 'Just now'
+  if (m < 60) return `${m} min ago`
+  if (m < 1440) return `${Math.floor(m / 60)} h ago`
+  return new Date(s * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+const day = (s) => new Date(s * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+
+function showError(message) { const b = $('error'); b.textContent = message; b.hidden = !message }
+
+// ---------- overview ----------
+async function loadOverview() {
+  const o = await call('GET', '/v1/admin/overview')
+  const b = o.backend
+  $('health').hidden = false
+  $('health-dot').className = `dot ${b.available ? 'ok' : 'bad'}`
+  $('health-text').textContent = b.available ? `${b.kind} ${b.version ?? ''}`.trim() : `${b.kind} unavailable`
+  const c = o.counts
+  $('counts').replaceChildren(...[[c.running, 'Running'], [c.stopped, 'Stopped'], [c.provisioning, 'Setting up'], [c.failed, 'Failed'], [c.total, 'All sandboxes'], [c.owners, 'Users']]
+    .map(([n, label]) => el('div', { class: 'count' }, el('b', {}, n), el('span', {}, label))))
+  const img = b.default_image ?? {}
+  const runtimes = Object.entries(img.runtimes ?? {}).map(([k, v]) => `${k} ${v}`).join(', ')
+  const cfg = o.config
+  $('facts').replaceChildren(
+    ...fact('Backend', b.available ? `${b.kind} ${b.version}` : b.reason),
+    ...fact('Standard image', el('span', {}, el('span', { class: 'mono' }, img.name ?? ''), runtimes ? ` (${runtimes})` : '')),
+    ...fact('Each sandbox gets', `${cfg.default_resources.cpus} CPUs, ${cfg.default_resources.memory_mb} MB, ${cfg.default_resources.pids} processes`),
+    ...fact('Idle sandboxes stop after', `${cfg.idle_stop_minutes} minutes`),
+    ...fact('Network guard', cfg.egress ? 'On: internet only, no private networks' : 'Off (debugging only)'),
+    ...fact('Container runtime', cfg.runtime === 'runsc' ? 'gVisor (runsc)' : 'runc'),
+  )
+}
+function fact(label, value) { return [el('div', {}, el('dt', {}, label), el('dd', {}, value))] }
+
+// ---------- sandboxes ----------
+let sandboxes = []
+async function loadSandboxes() {
+  sandboxes = (await call('GET', '/v1/admin/sandboxes')).data
+  renderSandboxes()
+}
+function renderSandboxes() {
+  const q = $('filter').value.trim().toLowerCase()
+  const st = $('state-filter').value
+  const shown = sandboxes.filter((s) => (!st || s.state === st) && (!q || [s.name, s.owner, s.image, s.id].some((v) => String(v ?? '').toLowerCase().includes(q))))
+  const plural = (n) => `${n} ${n === 1 ? 'sandbox' : 'sandboxes'}`
+  $('shown').textContent = shown.length === sandboxes.length ? plural(sandboxes.length) : `${shown.length} of ${plural(sandboxes.length)}`
+  if (shown.length === 0) {
+    $('rows').replaceChildren(el('tr', {}, el('td', { colspan: '7', class: 'empty' }, sandboxes.length ? 'Nothing matches the filter.' : 'No sandboxes yet. They appear here when someone creates an environment on the isolated sandbox.')))
+    return
+  }
+  $('rows').replaceChildren(...shown.map((s) => el('tr', {},
+    el('td', {}, el('div', {}, s.name), el('div', { class: 'mono muted' }, s.id)),
+    el('td', {}, s.owner),
+    el('td', {}, el('span', { class: 'pill', title: s.error ?? '' }, el('span', { class: `dot ${s.state}` }), s.state), s.error ? el('div', { class: 'muted', style: 'font-size:12px;max-width:260px' }, s.error) : null),
+    el('td', { class: 'mono' }, s.image),
+    el('td', {}, ago(s.last_used_at)),
+    el('td', {}, day(s.created_at)),
+    el('td', { class: 'actions' },
+      s.state === 'stopped' ? el('button', { onclick: () => act(s, 'start') }, 'Start') : null,
+      s.state === 'running' ? el('button', { onclick: () => act(s, 'stop') }, 'Stop') : null,
+      el('button', { class: 'danger', onclick: () => remove(s) }, 'Delete')),
+  )))
+}
+async function act(s, action) {
+  try { await call('POST', `/v1/admin/sandboxes/${encodeURIComponent(s.id)}/${action}`); showError(''); await refresh() } catch (e) { showError(e.message) }
+}
+async function remove(s) {
+  if (!confirm(`Delete "${s.name}" (${s.owner})? Its files are removed for good. The user's environment in Agentry will show it as gone.`)) return
+  try { await call('DELETE', `/v1/admin/sandboxes/${encodeURIComponent(s.id)}`); showError(''); await refresh() } catch (e) { showError(e.message) }
+}
+
+// ---------- limits ----------
+async function loadLimits() {
+  current = await call('GET', '/v1/admin/limits')
+  renderLimits()
+}
+function renderLimits() {
+  const { limits, defaults, overrides } = current
+  $('limits').replaceChildren(...LIMITS.map(([key, label, help, step]) => {
+    const input = el('input', { type: 'number', id: `limit-${key}`, min: step ? '0.1' : '0', step: step ? '0.1' : '1', value: String(limits[key]) })
+    const changed = key in overrides
+    return el('div', { class: 'limit' },
+      el('label', { for: `limit-${key}` }, label),
+      el('div', { class: 'help' }, `${help} Default ${defaults[key]}.`),
+      el('div', { class: 'field' }, changed ? el('span', { class: 'changed' }, 'Changed') : null, input))
+  }))
+  const owners = Object.entries(limits.owners ?? {})
+  $('owner-rows').replaceChildren(...(owners.length ? owners.map(([owner, o]) => ownerRow(owner, o)) : [el('tr', { id: 'no-owners' }, el('td', { colspan: '5', class: 'empty' }, 'No per-user limits. Everyone gets the limits above.'))]))
+}
+function ownerRow(owner = '', o = {}) {
+  const row = el('tr', { class: 'owner-row' },
+    el('td', {}, el('input', { type: 'text', class: 'owner-name', value: owner, placeholder: 'User id', 'aria-label': 'User id' })),
+    ...OWNER_KEYS.map((k) => el('td', {}, el('input', { type: 'number', min: '0', step: '1', 'data-key': k, value: o[k] ?? '', placeholder: 'Default', 'aria-label': k }))),
+    el('td', {}, el('button', { class: 'danger', onclick: () => row.remove() }, 'Remove')))
+  return row
+}
+function collectOverrides() {
+  const { defaults } = current
+  const out = {}
+  for (const [key] of LIMITS) {
+    const raw = $(`limit-${key}`).value.trim()
+    if (raw === '') throw new Error(`Fill in "${LIMITS.find((l) => l[0] === key)[1]}".`)
+    const n = Number(raw)
+    if (n !== defaults[key]) out[key] = n
+  }
+  const owners = {}
+  for (const row of document.querySelectorAll('.owner-row')) {
+    const name = row.querySelector('.owner-name').value.trim()
+    const entry = {}
+    for (const input of row.querySelectorAll('input[data-key]')) if (input.value.trim() !== '') entry[input.dataset.key] = Number(input.value)
+    if (!name && Object.keys(entry).length === 0) continue
+    if (!name) throw new Error('Each per-user row needs a user id.')
+    owners[name] = entry
+  }
+  if (Object.keys(owners).length > 0 || Object.keys(defaults.owners ?? {}).length > 0) out.owners = owners
+  return out
+}
+async function saveLimits() {
+  try {
+    current = await call('PUT', '/v1/admin/limits', { overrides: collectOverrides() })
+    renderLimits()
+    flash('Saved. The new limits apply now.')
+  } catch (e) { if (e.message !== 'signed out') flash(e.message, true) }
+}
+async function resetLimits() {
+  if (!confirm('Return every limit to the environment settings?')) return
+  try { current = await call('DELETE', '/v1/admin/limits'); renderLimits(); flash('Back to the environment settings.') } catch (e) { flash(e.message, true) }
+}
+function flash(text, bad = false) { const s = $('limits-status'); s.textContent = text; s.style.color = bad ? 'var(--bad)' : 'var(--ok)' }
+
+// ---------- session ----------
+async function refresh() {
+  try { await Promise.all([loadOverview(), loadSandboxes()]); showError('') } catch (e) { if (e.message !== 'signed out') showError(e.message) }
+}
+async function start() {
+  $('signin').hidden = true
+  $('app').hidden = false
+  $('signout').hidden = false
+  await Promise.all([refresh(), loadLimits().catch((e) => showError(e.message))])
+  clearInterval(timer)
+  timer = setInterval(() => { if (!document.hidden) void refresh() }, 5000)
+}
+function signOut(message) {
+  store.set(null)
+  clearInterval(timer)
+  $('app').hidden = true
+  $('signout').hidden = true
+  $('health').hidden = true
+  $('signin').hidden = false
+  const e = $('signin-error'); e.textContent = message ?? ''; e.hidden = !message
+  $('key').focus()
+}
+
+$('signin-form').addEventListener('submit', (ev) => { ev.preventDefault(); store.set($('key').value.trim()); $('key').value = ''; void start() })
+$('signout').addEventListener('click', () => signOut())
+$('filter').addEventListener('input', renderSandboxes)
+$('state-filter').addEventListener('change', renderSandboxes)
+$('add-owner').addEventListener('click', () => { $('no-owners')?.remove(); $('owner-rows').append(ownerRow()) })
+$('save-limits').addEventListener('click', () => void saveLimits())
+$('reset-limits').addEventListener('click', () => void resetLimits())
+store.get() ? void start() : signOut()
+</script>
+</body>
+</html>

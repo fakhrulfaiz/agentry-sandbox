@@ -13,6 +13,7 @@ import { loadConfig, type SandboxConfig } from './config.ts'
 import { createServer } from './http/server.ts'
 import { createSandboxService, type SandboxService } from './sandboxes.ts'
 import { createMemoryStore } from './store/memory.ts'
+import type { Store } from './store/types.ts'
 
 export interface TestService {
   url: string
@@ -20,6 +21,8 @@ export interface TestService {
   config: SandboxConfig
   backend: FakeBackend
   service: SandboxService
+  /** The in-memory store behind the service. */
+  store: Store
   close(): Promise<void>
 }
 
@@ -71,6 +74,7 @@ export async function startTestService(env: Record<string, string> = {}, makeBac
     config,
     backend,
     service,
+    store,
     ownersSeen,
     close: () =>
       new Promise<void>((r) => {

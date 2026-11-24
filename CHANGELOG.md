@@ -2,6 +2,14 @@
 
 
 
+
+## 2026-11-24 — admin page
+
+- `/admin`: a single HTML page for operators, signed in with an admin key (`AGENTRY_SANDBOX_ADMIN_KEYS`, separate from the API keys; the key stays in the browser tab's session storage). It shows the backend, the standard image's software and the defaults; every user's sandboxes with start, stop and delete; and the limits, editable live including per-user overrides. Strict content security policy, no external resources, light and dark.
+- Live limits: overrides saved from the admin page are stored in the new `settings` table (migration `0002_settings.sql`), validated (whole numbers, CPU 0.1–256, memory 128 MB–1 TB, per-user keys only), applied at once, read back at startup, and cleared by "Reset to defaults".
+- `/v1/admin/overview`, `/v1/admin/sandboxes`, `/v1/admin/sandboxes/{id}[/start|stop]`, `/v1/admin/limits` (admin key only; 404 when no admin keys are set). Admin keys are refused on `/v1/*` and API keys on `/v1/admin/*`.
+- `scripts/dev.sh`: the development launcher, reading its keys from the Agentry API's git-ignored `.env`.
+
 ## 2026-11-24 — default image info
 
 - `GET /v1/backends` adds `default_image: { name, runtimes, python_packages, tools }`, read from the image's `org.agentry.runtimes`, `org.agentry.python-packages` and `org.agentry.tools` labels (only `name` for an unlabelled image). The default image `agentry/sandbox:1` carries these labels; rebuild it with `scripts/images-build.sh`.

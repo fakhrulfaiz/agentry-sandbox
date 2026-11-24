@@ -63,5 +63,11 @@ export interface Store {
     update(id: string, owner: string, patch: TemplatePatch): Promise<TemplateRecord | undefined>
     delete(id: string, owner: string): Promise<boolean>
   }
+  /** Service-wide settings (JSON per key), for runtime changes such as the admin page's limits. */
+  settings: {
+    get(key: string): Promise<unknown>
+    /** `undefined` removes the key. */
+    set(key: string, value: unknown): Promise<void>
+  }
   close(): Promise<void>
 }

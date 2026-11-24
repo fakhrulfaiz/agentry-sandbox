@@ -7,6 +7,8 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import http from 'node:http'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import type { Backend } from '../backends/types.ts'
 import type { SandboxConfig } from '../config.ts'
 import { BackendUnavailableError, LimitError, NotFoundError, QuotaExceededError, type SandboxService } from '../sandboxes.ts'
@@ -124,6 +126,16 @@ const templateRecordToWire = (t: TemplateRecord) => ({ id: t.id, object: 'templa
 
 const list = <T>(data: T[]) => ({ object: 'list', data })
 
+/** The admin page (one HTML file, no build), read once at startup. */
+function loadAdminPage(): string {
+  try {
+    return readFileSync(fileURLToPath(new URL('../admin/index.html', import.meta.url)), 'utf8')
+  } catch {
+    return ADMIN_OFF_PAGE
+  }
+}
+const ADMIN_OFF_PAGE = '<!doctype html><meta charset="utf-8"><title>Agentry Sandbox</title><p style="font:16px system-ui;margin:3rem">The admin page is off. Set <code>AGENTRY_SANDBOX_ADMIN_KEYS</code> and restart the service.</p>'
+
 // ---- routing -------------------------------------------------------------
 
 interface Ctx {
@@ -182,6 +194,60 @@ async function readJson(req: http.IncomingMessage): Promise<Record<string, unkno
 export function createServer(deps: { config: SandboxConfig; service: SandboxService; store: Store; backend: Backend }): http.Server {
   const { config, service, store, backend } = deps
   const keyHashes = config.apiKeyHashes.map((k) => Buffer.from(k.slice('sha256:'.length), 'hex'))
+  const adminHashes = config.adminKeyHashes.map((k) => Buffer.from(k.slice('sha256:'.length), 'hex'))
+  const adminPage = loadAdminPage()
+
+  /** The admin surface takes only admin keys; an API key is refused there (and an admin key is refused on /v1). */
+  function adminAuthorized(req: http.IncomingMessage): boolean {
+    const m = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')
+    if (!m) return false
+    const digest = createHash('sha256').update(m[1]!).digest()
+    return adminHashes.some((h) => h.length === digest.length && timingSafeEqual(h, digest))
+  }
+
+  /** `/v1/admin/...`: every owner's sandboxes, the service overview and the live limits. */
+  async function dispatchAdmin(method: string, path: string, body: () => Promise<Record<string, unknown>>): Promise<{ status: number; body?: unknown }> {
+    const [, , , a, id, action] = path.split('/')
+    if (a === 'overview' && !id && method === 'GET') {
+      const av = await backend.available()
+      const info = av.ok && backend.describeImage ? await backend.describeImage(config.defaultImage) : undefined
+      const all = await service.listEverything()
+      const count = (state: string) => all.filter((r) => r.state === state).length
+      return { status: 200, body: {
+        backend: { kind: backend.kind, available: av.ok, ...(av.ok ? { version: av.version } : { reason: av.reason }), default_image: { name: config.defaultImage, ...(info ?? {}) } },
+        config: {
+          envd_reach: config.envdReach, runtime: config.runtime, egress: config.egress, idle_stop_minutes: config.idleStopMinutes,
+          default_resources: { cpus: config.resources.cpus, memory_mb: Math.round(config.resources.memoryBytes / 1024 / 1024), pids: config.resources.pids },
+        },
+        counts: { total: all.length, running: count('running'), stopped: count('stopped'), provisioning: count('provisioning'), failed: count('failed'), owners: new Set(all.map((r) => r.owner)).size },
+      } }
+    }
+    if (a === 'sandboxes') {
+      if (!id && method === 'GET') return { status: 200, body: list((await service.listEverything()).map((r) => ({ ...sandboxToWire(r, config.defaultImage), owner: r.owner }))) }
+      const owner = id ? await service.ownerOf(id) : undefined
+      if (!id || owner === undefined) throw new NotFoundError(`sandbox ${id ?? ''} not found`)
+      if (!action && method === 'DELETE') {
+        await service.destroy(owner, id)
+        return { status: 200, body: { id, object: 'sandbox.deleted', deleted: true } }
+      }
+      if (action === 'start' && method === 'POST') return { status: 200, body: { ...sandboxToWire(await service.start(owner, id), config.defaultImage), owner } }
+      if (action === 'stop' && method === 'POST') return { status: 200, body: { ...sandboxToWire(await service.stop(owner, id), config.defaultImage), owner } }
+    }
+    if (a === 'limits' && !id) {
+      const view = () => ({ limits: service.limits(), defaults: config.limits, overrides: service.limitOverrides() })
+      if (method === 'GET') return { status: 200, body: view() }
+      if (method === 'PUT') {
+        const b = await body()
+        await service.setLimits((b.overrides ?? {}) as Record<string, never>)
+        return { status: 200, body: view() }
+      }
+      if (method === 'DELETE') {
+        await service.setLimits(null)
+        return { status: 200, body: view() }
+      }
+    }
+    throw new HttpError(404, 'not_found', 'route not found')
+  }
 
   function authorized(req: http.IncomingMessage): boolean {
     const m = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')
@@ -286,6 +352,18 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
       const method = req.method ?? 'GET'
       try {
         if (url.pathname === '/v1/health' && method === 'GET') return send(res, 200, { ok: true })
+        if ((url.pathname === '/admin' || url.pathname === '/admin/') && method === 'GET') {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" })
+          res.end(adminHashes.length > 0 ? adminPage : ADMIN_OFF_PAGE)
+          return
+        }
+        if (url.pathname.startsWith('/v1/admin/')) {
+          if (adminHashes.length === 0) return fail(res, 404, 'not_found', 'the admin surface is off (set AGENTRY_SANDBOX_ADMIN_KEYS)')
+          if (!adminAuthorized(req)) return fail(res, 401, 'unauthorized', 'a valid admin key is required')
+          let adminBody: Promise<Record<string, unknown>> | undefined
+          const result = await dispatchAdmin(method, url.pathname, () => (adminBody ??= readJson(req)))
+          return send(res, result.status, result.body)
+        }
         if (!authorized(req)) return fail(res, 401, 'unauthorized', 'a valid API key is required')
         const owner = req.headers['x-agentry-owner']
         if (typeof owner !== 'string' || !owner.trim()) return fail(res, 400, 'owner_required', 'X-Agentry-Owner is required')

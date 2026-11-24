@@ -30,6 +30,8 @@ export interface SandboxConfig {
   databaseUrl: string
   /** Accepted API keys as `sha256:<64 hex>`; the plaintext key is never stored. */
   apiKeyHashes: string[]
+  /** Admin keys (the /admin page and /v1/admin), same format; empty turns the admin surface off. */
+  adminKeyHashes: string[]
   /** Derives each sandbox's envd access token (HMAC); at least 32 bytes. */
   secret: string
   docker: { socketPath?: string; host?: string }
@@ -104,12 +106,16 @@ export function loadConfig(env: Env): SandboxConfig {
   if (apiKeyHashes.length === 0 || apiKeyHashes.some((k) => !KEY_HASH.test(k))) {
     throw new ConfigError('AGENTRY_SANDBOX_API_KEYS must be a comma-separated list of sha256:<64 hex>')
   }
+  const adminKeyHashes = (env.AGENTRY_SANDBOX_ADMIN_KEYS ?? '').split(',').map((k) => k.trim()).filter(Boolean)
+  if (adminKeyHashes.some((k) => !KEY_HASH.test(k))) throw new ConfigError('AGENTRY_SANDBOX_ADMIN_KEYS must be a comma-separated list of sha256:<64 hex>')
+  if (adminKeyHashes.some((k) => apiKeyHashes.includes(k))) throw new ConfigError('AGENTRY_SANDBOX_ADMIN_KEYS must differ from AGENTRY_SANDBOX_API_KEYS')
   const secret = required(env, 'AGENTRY_SANDBOX_SECRET')
   if (Buffer.byteLength(secret) < 32) throw new ConfigError('AGENTRY_SANDBOX_SECRET must be at least 32 bytes')
   const host = env.DOCKER_HOST?.trim()
   return {
     port: integer(env, 'AGENTRY_SANDBOX_PORT', 3090),
     databaseUrl,
+    adminKeyHashes,
     apiKeyHashes,
     secret,
     docker: host ? { host } : {},

@@ -36,7 +36,9 @@ Hardened Docker sandboxes on demand for Agentry agents. Each sandbox is one cont
    | `AGENTRY_SANDBOX_MAX_CPUS` / `_MAX_MEMORY_MB` | `4` / `8192` | the most a template may ask for (400 if more) |
    | `AGENTRY_SANDBOX_OWNER_LIMITS` | — | per-owner overrides, JSON: `{"alice":{"maxPerOwner":10,"maxRunningPerOwner":4,"maxCreatesPerHour":50}}` |
 
-6. Run in herdr: `hc run --bg --no-parent --outlive-parent --name agentry-sandbox -- pnpm dev`, then `AGENTRY_SANDBOX_KEY=<key> pnpm exec tsx scripts/smoke.ts`.
+   **Admin page:** `AGENTRY_SANDBOX_ADMIN_KEYS` (optional, same `sha256:<hex>` format, must differ from the API keys) turns on `http://<host>:<port>/admin`: one HTML page (no build) with the service overview, every user's sandboxes (start, stop, delete) and the limits, which can be changed there live. Saved limit overrides are kept in the database (`settings` table) and win over the environment until "Reset to defaults". Its API is `/v1/admin/overview`, `/v1/admin/sandboxes[/{id}[/start|stop]]` and `/v1/admin/limits` (GET, PUT `{ overrides }`, DELETE), admin key only. Without admin keys the page says how to turn it on and `/v1/admin/*` answers 404.
+
+6. Run in herdr: `hc run --bg --no-parent --outlive-parent --name agentry-sandbox bash scripts/dev.sh`, then `AGENTRY_SANDBOX_KEY=<key> pnpm exec tsx scripts/smoke.ts`. `scripts/dev.sh` reads `AGENTRY_SANDBOX_KEY`, `AGENTRY_SANDBOX_SECRET` and `AGENTRY_SANDBOX_ADMIN_KEY` from the Agentry API's git-ignored `.env` (`~/code/dsh-agents-api/.env`, or `AGENTRY_ENV_FILE`), hashes the keys and finds the database password from the `agentry-postgres` container.
 
 ## Security model
 

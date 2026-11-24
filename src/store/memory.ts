@@ -6,6 +6,7 @@ const copy = <T>(v: T): T => structuredClone(v)
 export function createMemoryStore(): Store {
   const sandboxes = new Map<string, SandboxRecord>()
   const templates = new Map<string, TemplateRecord>()
+  const settings = new Map<string, unknown>()
   const owned = <T extends { owner: string }>(m: Map<string, T>, id: string, owner: string) => {
     const r = m.get(id)
     return r && r.owner === owner ? r : undefined
@@ -60,6 +61,15 @@ export function createMemoryStore(): Store {
       },
       async delete(id, owner) {
         return owned(templates, id, owner) ? templates.delete(id) : false
+      },
+    },
+    settings: {
+      async get(key) {
+        return settings.has(key) ? structuredClone(settings.get(key)) : undefined
+      },
+      async set(key, value) {
+        if (value === undefined) settings.delete(key)
+        else settings.set(key, structuredClone(value))
       },
     },
     async close() {},
