@@ -27,3 +27,8 @@ RUN useradd -m -u 1000 -s /bin/bash agent \
  && chown agent:agent /workspace
 
 WORKDIR /workspace
+
+# What the image ships, read by Agentry Sandbox for the Providers page. Debian bookworm's python3 is 3.11.
+LABEL org.agentry.runtimes="{\"node\":\"${NODE_VERSION}\",\"pnpm\":\"${PNPM_VERSION}\",\"python\":\"3.11\"}" \
+      org.agentry.python-packages="numpy pandas python-dateutil python-docx python-pptx openpyxl Pillow lxml XlsxWriter" \
+      org.agentry.tools="git curl jq build-essential sudo"

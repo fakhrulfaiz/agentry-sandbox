@@ -82,7 +82,7 @@ describe('HTTP API', () => {
     const r = await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'box' }) })
     expect(r.status).toBe(503)
     expect((await json(r)).error).toMatchObject({ code: 'backend_unavailable', message: 'Docker is not reachable' })
-    expect((await json(await s.call('/v1/backends'))).data).toEqual([{ kind: 'fake', available: false, reason: 'Docker is not reachable', capabilities: expect.any(Object) }])
+    expect((await json(await s.call('/v1/backends'))).data).toEqual([{ kind: 'fake', available: false, reason: 'Docker is not reachable', capabilities: expect.any(Object), default_image: { name: 'agentry/sandbox:1' } }])
   })
 
   it('unknown routes answer 404', async () => {
@@ -99,5 +99,15 @@ describe('limits over HTTP', () => {
     expect((await json(r)).error).toMatchObject({ code: 'quota_exceeded', message: expect.stringContaining('limit 1') })
     const big = await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'c', template: { resources: { cpus: 64 } } }) })
     expect(big.status).toBe(400)
+  })
+})
+
+describe('image info', () => {
+  it('reads org.agentry labels, and nothing from an unlabelled image', async () => {
+    const { imageInfoFromLabels } = await import('../src/backends/docker.ts')
+    expect(imageInfoFromLabels({ 'org.agentry.runtimes': '{"node":"24.21.0","python":"3.11","bad":1}', 'org.agentry.python-packages': 'pandas  numpy', 'org.agentry.tools': 'git' }))
+      .toEqual({ runtimes: { node: '24.21.0', python: '3.11' }, python_packages: ['pandas', 'numpy'], tools: ['git'] })
+    expect(imageInfoFromLabels({ 'org.agentry.runtimes': 'not json' })).toBeUndefined()
+    expect(imageInfoFromLabels({})).toBeUndefined()
   })
 })

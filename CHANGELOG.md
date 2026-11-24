@@ -1,6 +1,11 @@
 # Changelog
 
 
+
+## 2026-11-24 — default image info
+
+- `GET /v1/backends` adds `default_image: { name, runtimes, python_packages, tools }`, read from the image's `org.agentry.runtimes`, `org.agentry.python-packages` and `org.agentry.tools` labels (only `name` for an unlabelled image). The default image `agentry/sandbox:1` carries these labels; rebuild it with `scripts/images-build.sh`.
+
 ## 2026-11-24 — small fixes
 
 - `workspace_path` may not sit inside a directory the sandbox image needs (`/opt/agentry`, `/proc`, `/sys`, `/dev`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/run`, `/var/run`, `/var/lib`): 400.

@@ -69,6 +69,9 @@ export function createFakeBackend(): FakeBackend {
       if (connection !== undefined) return { ok: false, reason: connection }
       return availability
     },
+    async describeImage() {
+      return { runtimes: { python: '3.11', node: '24' }, python_packages: ['pandas'], tools: ['git'] }
+    },
     async create(id: string, owner: string, _spec: TemplateSpec) {
       down()
       calls.push(`create ${id}`)

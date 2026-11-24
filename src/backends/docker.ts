@@ -14,7 +14,7 @@ import { runInEnvd, sq } from '../envd/run.ts'
 import { envdToken } from '../envd/token.ts'
 import type { TemplateSpec } from '../store/types.ts'
 import { envdArchive, treeArchive } from './envd-binary.ts'
-import type { Availability, Backend, BackendHandle, NetworkGuard } from './types.ts'
+import type { Availability, Backend, BackendHandle, ImageInfo, NetworkGuard } from './types.ts'
 
 const ENVD_PORT = '49983/tcp'
 const DEFAULT_WORKSPACE = '/workspace'
@@ -189,6 +189,15 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
       }
     },
 
+    async describeImage(image) {
+      try {
+        const labels = (await client.getImage(image).inspect()).Config?.Labels ?? {}
+        return imageInfoFromLabels(labels)
+      } catch {
+        return undefined
+      }
+    },
+
     async create(id, owner, spec) {
       const image = spec.image ?? config.defaultImage
       await ensureImage(image)
@@ -277,4 +286,18 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
       }))
     },
   }
+}
+
+/** `org.agentry.*` image labels as `ImageInfo`; `undefined` when the image has none. */
+export function imageInfoFromLabels(labels: Record<string, string>): ImageInfo | undefined {
+  const words = (v: string | undefined) => (v ?? '').split(/\s+/u).filter(Boolean)
+  let runtimes: Record<string, string> = {}
+  try {
+    const parsed = JSON.parse(labels['org.agentry.runtimes'] ?? '{}') as unknown
+    if (parsed && typeof parsed === 'object') runtimes = Object.fromEntries(Object.entries(parsed).filter(([, v]) => typeof v === 'string')) as Record<string, string>
+  } catch {
+    runtimes = {}
+  }
+  const info = { runtimes, python_packages: words(labels['org.agentry.python-packages']), tools: words(labels['org.agentry.tools']) }
+  return Object.keys(info.runtimes).length + info.python_packages.length + info.tools.length > 0 ? info : undefined
 }
