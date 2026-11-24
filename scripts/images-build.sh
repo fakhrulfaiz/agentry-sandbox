@@ -10,3 +10,4 @@ echo '{}' > "$cfg/config.json"
 export DOCKER_CONFIG=$cfg
 docker build -t agentry/envd:envd-v0.6.13 images/envd
 docker build -t agentry/sandbox:1 images/sandbox
+docker build -t agentry/netguard:1 images/netguard
