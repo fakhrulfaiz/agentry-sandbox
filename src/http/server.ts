@@ -92,12 +92,15 @@ export function templateFromWire(v: unknown): TemplateSpec {
   return t
 }
 
+/** System and Agentry directories a workspace volume must not shadow. */
+const RESERVED_PATHS = ['/opt/agentry', '/proc', '/sys', '/dev', '/etc', '/usr', '/bin', '/sbin', '/lib', '/lib32', '/lib64', '/boot', '/run', '/var/run', '/var/lib']
 const WORKSPACE_PATH = /^(\/[A-Za-z0-9._-]+)+$/
 function workspacePathFromWire(v: unknown): string | undefined {
   if (v === undefined || v === null) return undefined
   if (typeof v !== 'string' || !WORKSPACE_PATH.test(v) || v.split('/').some((seg) => seg === '.' || seg === '..') || v.length > 200) {
     throw invalid('workspace_path must be a clean absolute path such as /workspace')
   }
+  if (RESERVED_PATHS.some((r) => v === r || v.startsWith(`${r}/`))) throw invalid(`workspace_path must not be inside ${v.split('/').slice(0, 3).join('/')}, which the sandbox image needs`)
   return v
 }
 

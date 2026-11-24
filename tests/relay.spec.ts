@@ -45,6 +45,13 @@ describe('envd relay', () => {
     expect(h['connect-protocol-version']).toBe('1')
   })
 
+  it('refuses an invalid X-Envd-User instead of using envd\'s default user', async () => {
+    const id = await create()
+    const r = await s.call(`/v1/sandboxes/${id}/envd/process.Process/List`, { method: 'POST', body: '{}', headers: { 'X-Envd-User': 'root:x' } })
+    expect(r.status).toBe(400)
+    expect(seen).toHaveLength(0)
+  })
+
   it('streams chunks as they arrive', async () => {
     const id = await create()
     let finished = false
