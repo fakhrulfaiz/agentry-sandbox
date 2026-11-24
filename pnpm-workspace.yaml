@@ -1,0 +1,8 @@
+allowBuilds:
+  '@bufbuild/buf': true
+  cpu-features: false
+  esbuild: true
+  protobufjs: false
+  ssh2: false
+minimumReleaseAgeExclude:
+  - tar-stream@3.3.0
