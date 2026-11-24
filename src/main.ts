@@ -27,6 +27,7 @@ async function main(): Promise<void> {
   const guard = createNetworkGuard(docker, config)
   const backend = createDockerBackend(config, guard)
   const service = createSandboxService({ store, backend, config })
+  await service.loadSettings()
 
   const available = await backend.available()
   log(available.ok ? `docker ${available.version}` : `docker unavailable: ${available.reason}`)
@@ -39,7 +40,8 @@ async function main(): Promise<void> {
 
   const server = createServer({ config, service, store, backend })
   await new Promise<void>((resolve) => server.listen(config.port, host, resolve))
-  log(`listening on http://${host}:${String(config.port)} (envd reach: ${config.envdReach}, runtime: ${config.runtime}, egress guard: ${config.egress ? 'on' : 'off'}, limits: ${JSON.stringify({ ...config.limits, owners: Object.keys(config.limits.owners).length })})`)
+  if (config.adminKeyHashes.length > 0) log(`admin page on http://${host}:${String(config.port)}/admin`)
+  log(`listening on http://${host}:${String(config.port)} (envd reach: ${config.envdReach}, runtime: ${config.runtime}, egress guard: ${config.egress ? 'on' : 'off'}, limits: ${JSON.stringify({ ...service.limits(), owners: Object.keys(service.limits().owners).length })})`)
 
   const sweep = setInterval(() => {
     void service

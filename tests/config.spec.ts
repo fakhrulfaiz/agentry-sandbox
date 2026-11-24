@@ -66,3 +66,15 @@ describe('limits config', () => {
     expect(() => loadConfig({ ...base, AGENTRY_SANDBOX_OWNER_LIMITS: '{"alice":{"maxPerOwner":-1}}' })).toThrow('AGENTRY_SANDBOX_OWNER_LIMITS')
   })
 })
+
+describe('admin keys', () => {
+  it('are optional, must be hashes, and must differ from the API keys', async () => {
+    const { loadConfig } = await import('../src/config.ts')
+    const h = (c: string) => `sha256:${c.repeat(64)}`
+    const base = { AGENTRY_SANDBOX_DATABASE_URL: 'postgres://x@y/z', AGENTRY_SANDBOX_API_KEYS: h('a'), AGENTRY_SANDBOX_SECRET: 's'.repeat(32) }
+    expect(loadConfig(base).adminKeyHashes).toEqual([])
+    expect(loadConfig({ ...base, AGENTRY_SANDBOX_ADMIN_KEYS: h('b') }).adminKeyHashes).toEqual([h('b')])
+    expect(() => loadConfig({ ...base, AGENTRY_SANDBOX_ADMIN_KEYS: 'plain' })).toThrow(/ADMIN_KEYS/)
+    expect(() => loadConfig({ ...base, AGENTRY_SANDBOX_ADMIN_KEYS: h('a') })).toThrow(/differ/)
+  })
+})

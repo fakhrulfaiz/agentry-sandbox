@@ -134,6 +134,16 @@ export function createPostgresStore(pool: pg.Pool, opts: { ownsPool: boolean } =
         return ((await pool.query('delete from templates where id = $1 and owner = $2', [id, owner])).rowCount ?? 0) > 0
       },
     },
+    settings: {
+      async get(key) {
+        const row = (await pool.query<{ value: unknown }>('select value from settings where key = $1', [key])).rows[0]
+        return row?.value
+      },
+      async set(key, value) {
+        if (value === undefined) await pool.query('delete from settings where key = $1', [key])
+        else await pool.query('insert into settings (key, value, updated_at) values ($1, $2, now()) on conflict (key) do update set value = excluded.value, updated_at = now()', [key, JSON.stringify(value)])
+      },
+    },
     async close() {
       if (opts.ownsPool) await pool.end()
     },
