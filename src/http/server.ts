@@ -92,6 +92,15 @@ export function templateFromWire(v: unknown): TemplateSpec {
   return t
 }
 
+const WORKSPACE_PATH = /^(\/[A-Za-z0-9._-]+)+$/
+function workspacePathFromWire(v: unknown): string | undefined {
+  if (v === undefined || v === null) return undefined
+  if (typeof v !== 'string' || !WORKSPACE_PATH.test(v) || v.split('/').some((seg) => seg === '.' || seg === '..') || v.length > 200) {
+    throw invalid('workspace_path must be a clean absolute path such as /workspace')
+  }
+  return v
+}
+
 const sandboxToWire = (r: SandboxRecord, defaultImage: string) => ({
   id: r.id,
   object: 'sandbox',
@@ -100,6 +109,7 @@ const sandboxToWire = (r: SandboxRecord, defaultImage: string) => ({
   state: r.state,
   template_id: r.templateId,
   image: r.template.image ?? defaultImage,
+  workspace_path: r.template.workspacePath ?? '/workspace',
   template: templateToWire(r.template),
   error: r.error,
   created_at: sec(r.createdAt),
@@ -197,7 +207,9 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
           const body = await ctx.body()
           const templateId = body.template_id
           if (templateId !== undefined && typeof templateId !== 'string') throw invalid('template_id must be a string')
-          const r = await service.create(ctx.owner, { name: name(body), ...(templateId ? { templateId } : {}), template: templateFromWire(body.template) })
+          const workspacePath = workspacePathFromWire(body.workspace_path)
+          const template = { ...templateFromWire(body.template), ...(workspacePath ? { workspacePath } : {}) }
+          const r = await service.create(ctx.owner, { name: name(body), ...(templateId ? { templateId } : {}), template })
           return { status: 201, body: sandboxToWire(r, config.defaultImage) }
         }
       } else if (!action) {

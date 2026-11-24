@@ -146,4 +146,16 @@ describe.skipIf(!dockerAvailable)('docker backend', () => {
     await expect(bad.start(id, handle, {})).rejects.toThrow(/envd/)
     expect(await backend.status(handle)).toBe('stopped')
   })
+
+  it('mounts the workspace at a custom workspace path, owned by agent', async () => {
+    const cfg = config()
+    const backend = createDockerBackend(cfg, createPassthroughNetworkGuard())
+    const id = newId()
+    const handle = await backend.create(id, 'alice', { workspacePath: '/home/mffaiz/agentry-workspaces/dev/sandbox-x' })
+    const { baseUrl } = await backend.endpoint(handle)
+    const r = await runInEnvd(createEnvdClient({ baseUrl, accessToken: envdToken(cfg.secret, id) }), 'agent', 'pwd; stat -c %U .; touch ok && echo writable')
+    expect(r.stdout).toContain('/home/mffaiz/agentry-workspaces/dev/sandbox-x')
+    expect(r.stdout).toContain('agent')
+    expect(r.stdout).toContain('writable')
+  })
 })

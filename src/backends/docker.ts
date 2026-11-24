@@ -17,7 +17,8 @@ import { envdArchive } from './envd-binary.ts'
 import type { Availability, Backend, BackendHandle, NetworkGuard } from './types.ts'
 
 const ENVD_PORT = '49983/tcp'
-const WORKSPACE = '/workspace'
+const DEFAULT_WORKSPACE = '/workspace'
+const workspaceOf = (spec: TemplateSpec) => spec.workspacePath ?? DEFAULT_WORKSPACE
 const AGENT = 'agent'
 /** Docker's default capability set minus NET_RAW: enough for sudo, package managers and chown. */
 const CAP_ADD = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'KILL', 'SETGID', 'SETUID', 'SETPCAP', 'NET_BIND_SERVICE', 'SYS_CHROOT', 'AUDIT_WRITE', 'MKNOD']
@@ -40,8 +41,8 @@ export function dockerClient(config: SandboxConfig, timeout: number | undefined 
 const isNotFound = (e: unknown) => (e as { statusCode?: number }).statusCode === 404
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** The script that makes `agent` (uid 1000) with passwordless sudo, on Debian-like or Alpine images. */
-const ENSURE_AGENT = `
+/** The script that makes `agent` (uid 1000) with passwordless sudo, on Debian-like or Alpine images, and owns the workspace. */
+const ensureAgent = (WORKSPACE: string) => `
 set -e
 if command -v apt-get >/dev/null 2>&1; then PM=apt; elif command -v apk >/dev/null 2>&1; then PM=apk; else PM=none; fi
 if ! command -v sudo >/dev/null 2>&1; then
@@ -57,8 +58,8 @@ fi
 mkdir -p /etc/sudoers.d
 printf '${AGENT} ALL=(ALL) NOPASSWD:ALL\\n' > /etc/sudoers.d/${AGENT}
 chmod 0440 /etc/sudoers.d/${AGENT}
-mkdir -p ${WORKSPACE}
-chown ${AGENT}: ${WORKSPACE}
+mkdir -p ${sq(WORKSPACE)}
+chown ${AGENT}: ${sq(WORKSPACE)}
 `
 
 function installScript(packages: string[]): string {
@@ -117,7 +118,8 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
       const r = await runInEnvd(envd, user, script, { ...(cwd ? { cwd } : {}), ...(spec.env ? { env: spec.env } : {}) })
       if (r.code !== 0) throw new Error(`${what} failed (exit ${String(r.code)}): ${(r.stderr || r.stdout).trim().slice(-500)}`)
     }
-    await must('root', ENSURE_AGENT, 'creating the agent user')
+    const WORKSPACE = workspaceOf(spec)
+    await must('root', ensureAgent(WORKSPACE), 'creating the agent user')
     if (spec.packages && spec.packages.length > 0) await must('root', installScript(spec.packages), 'installing packages')
     for (const file of spec.files ?? []) {
       const path = file.path.startsWith('/') ? file.path : `${WORKSPACE}/${file.path}`
@@ -140,7 +142,7 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
     await waitHealthy(handle)
     const { baseUrl } = await endpoint(handle)
     const envd = createEnvdClient({ baseUrl, accessToken: token(id) })
-    const base = { accessToken: token(id), defaultWorkdir: WORKSPACE, ...(spec.env ? { envVars: spec.env } : {}) }
+    const base = { accessToken: token(id), defaultWorkdir: workspaceOf(spec), ...(spec.env ? { envVars: spec.env } : {}) }
     if (handle.provisioned !== 'true') {
       await envd.init({ ...base, defaultUser: 'root' })
       await provision(envd, spec)
@@ -202,7 +204,7 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
         Entrypoint: ['/opt/agentry/envd', '--isnotfc', '--no-cgroups', '--port', '49983'],
         Cmd: [],
         User: 'root',
-        WorkingDir: WORKSPACE,
+        WorkingDir: workspaceOf(spec),
         Labels: labels,
         ExposedPorts: { [ENVD_PORT]: {} },
         HostConfig: {
@@ -215,7 +217,7 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
           Memory: memory,
           Runtime: config.runtime,
           NetworkMode: net,
-          Mounts: [{ Type: 'volume', Source: volume, Target: WORKSPACE }],
+          Mounts: [{ Type: 'volume', Source: volume, Target: workspaceOf(spec) }],
           ...(config.envdReach === 'loopback' ? { PortBindings: { [ENVD_PORT]: [{ HostIp: '127.0.0.1', HostPort: '' }] } } : {}),
         },
       })

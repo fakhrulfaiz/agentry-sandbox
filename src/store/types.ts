@@ -11,6 +11,8 @@ export interface TemplateSpec {
   network?: boolean
   files?: { path: string; content: string }[]
   resources?: Partial<{ cpus: number; memoryMb: number }>
+  /** Where the workspace is mounted inside the sandbox (set per sandbox at create; default /workspace). */
+  workspacePath?: string
 }
 
 export interface SandboxRecord {
