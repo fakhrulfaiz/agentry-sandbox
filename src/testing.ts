@@ -1,13 +1,15 @@
 /**
  * A real Agentry Sandbox HTTP service on an ephemeral port, over an in-memory
  * store and the fake backend, for tests here and in the Agentry API
- * (`@agentry/sandbox/testing`). Point `backend.setEndpoint` at a fake envd to
+ * (`@agentry/sandbox/testing`). Point `backend.setEndpoint` (the fake driver) at a fake envd to
  * exercise the relay.
  */
 import { createHash, randomBytes } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
-import { createDockerBackend, createFakeBackend, type FakeBackend } from './places/legacy.ts'
-import { createPassthroughNetworkGuard, type Backend } from './backends/types.ts'
+import { createPassthroughNetworkGuard, type Driver } from './places/driver.ts'
+import { createDockerDriver, dockerClient, dockerDshRuntime } from './places/drivers/docker.ts'
+import { createFakeDriver, type FakeDriver } from './places/drivers/fake.ts'
+import { createPlaceRegistry, type PlaceRegistry } from './places/registry.ts'
 import { loadConfig, type SandboxConfig } from './config.ts'
 import { createServer } from './http/server.ts'
 import { createSandboxService, type SandboxService } from './sandboxes.ts'
@@ -18,15 +20,16 @@ export interface TestService {
   url: string
   key: string
   config: SandboxConfig
-  backend: FakeBackend
+  backend: FakeDriver
   service: SandboxService
+  places: PlaceRegistry
   /** The in-memory store behind the service. */
   store: Store
   close(): Promise<void>
 }
 
 export interface DockerTestService extends Omit<TestService, 'backend'> {
-  backend: Backend
+  backend: Driver
   /** Removes every sandbox this service created (containers and volumes). */
   cleanup(): Promise<void>
 }
@@ -36,17 +39,20 @@ export interface DockerTestService extends Omit<TestService, 'backend'> {
  * integration suites that need real envd processes; callers skip without Docker.
  */
 export async function startDockerTestService(env: Record<string, string> = {}): Promise<DockerTestService> {
-  const base = await startTestService(env, (config) => createDockerBackend(config, createPassthroughNetworkGuard()))
+  const base = await startTestService(env, {
+    makeDriver: (config) => createDockerDriver(config, createPassthroughNetworkGuard()),
+    dshRuntime: (config) => dockerDshRuntime(config, dockerClient(config)),
+  })
   return {
     ...base,
-    backend: base.backend as unknown as Backend,
+    backend: base.backend as unknown as Driver,
     async cleanup() {
       for (const owner of base.ownersSeen) for (const s of await base.service.list(owner)) await base.service.destroy(owner, s.id).catch(() => {})
     },
   }
 }
 
-export async function startTestService(env: Record<string, string> = {}, makeBackend?: (config: SandboxConfig) => Backend): Promise<TestService & { ownersSeen: Set<string> }> {
+export async function startTestService(env: Record<string, string> = {}, real?: { makeDriver: (config: SandboxConfig) => Driver; dshRuntime: (config: SandboxConfig) => (() => Promise<Buffer>) | null }): Promise<TestService & { ownersSeen: Set<string> }> {
   const key = randomBytes(16).toString('hex')
   const config = loadConfig({
     AGENTRY_SANDBOX_DATABASE_URL: 'postgres://unused@localhost/unused',
@@ -60,12 +66,14 @@ export async function startTestService(env: Record<string, string> = {}, makeBac
     ...env,
   })
   const store = createMemoryStore()
-  const backend = (makeBackend ? makeBackend(config) : createFakeBackend()) as FakeBackend
-  const service = createSandboxService({ store, backend, config })
+  const backend = (real ? real.makeDriver(config) : createFakeDriver()) as FakeDriver
+  const places = await createPlaceRegistry({ store, config, local: backend, drivers: {} })
+  // The fake has no envd behind it, so nothing is provisioned there.
+  const service = createSandboxService({ store, places, config, ...(real ? { dshRuntime: real.dshRuntime(config) } : { provision: async (_d: Driver, _i: string, h: Record<string, string>) => h }) })
   const ownersSeen = new Set<string>()
   const create = service.create.bind(service)
   service.create = ((owner: string, ...rest: unknown[]) => { ownersSeen.add(owner); return (create as (...a: unknown[]) => unknown)(owner, ...rest) }) as typeof service.create
-  const server = createServer({ config, service, store, backend })
+  const server = createServer({ config, service, store, places })
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
   return {
     url: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`,
@@ -73,6 +81,7 @@ export async function startTestService(env: Record<string, string> = {}, makeBac
     config,
     backend,
     service,
+    places,
     store,
     ownersSeen,
     close: () =>

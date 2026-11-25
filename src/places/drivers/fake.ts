@@ -44,7 +44,7 @@ export function createFakeDriver(): FakeDriver {
 
   return {
     kind: 'fake',
-    capabilities: { persistent: true, reset: true, isolated: true, network: true, resources: false, gpu: false, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files'] },
+    capabilities: { persistent: true, reset: true, isolated: true, network: true, resources: false, gpu: false, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] },
     calls,
     failNextStart(reason) {
       failure = reason

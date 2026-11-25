@@ -61,7 +61,7 @@ describe('admin surface', () => {
     for (const n of [1, 2]) expect((await asOwner(svc, 'vip', '/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: `v${n}` }) })).status).toBe(201)
 
     // A restart (a new service over the same store) reads the saved overrides back.
-    const again = createSandboxService({ store: svc.store, backend: svc.backend, config: svc.config })
+    const again = createSandboxService({ store: svc.store, places: svc.places, config: svc.config, provision: async (_d, _i, h) => h })
     await again.loadSettings()
     expect(again.limits().maxPerOwner).toBe(1)
 

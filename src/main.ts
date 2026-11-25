@@ -6,7 +6,8 @@
  */
 import Docker from 'dockerode'
 import pg from 'pg'
-import { createDockerBackend } from './places/legacy.ts'
+import { createDockerDriver, dockerClient, dockerDshRuntime } from './places/drivers/docker.ts'
+import { createPlaceRegistry } from './places/registry.ts'
 import { createNetworkGuard } from './backends/network-guard.ts'
 import { ConfigError, loadConfig } from './config.ts'
 import { createServer } from './http/server.ts'
@@ -25,20 +26,22 @@ async function main(): Promise<void> {
   const store = createPostgresStore(pool)
   const docker = new Docker()
   const guard = createNetworkGuard(docker, config)
-  const backend = createDockerBackend(config, guard)
-  const service = createSandboxService({ store, backend, config })
+  const local = createDockerDriver(config, guard, docker)
+  const places = await createPlaceRegistry({ store, config, local, drivers: {} })
+  const service = createSandboxService({ store, places, config, dshRuntime: dockerDshRuntime(config, dockerClient(config)) })
   await service.loadSettings()
 
-  const available = await backend.available()
+  const available = await local.probe()
   log(available.ok ? `docker ${available.version}` : `docker unavailable: ${available.reason}`)
+  // Reconciles every place that answers; one that does not is skipped.
+  log('reconciled', await service.reconcile())
   if (available.ok) {
-    log('reconciled', await service.reconcile())
     // Rules left by crashed or removed sandboxes would block a later container that reuses the IP.
     const active = (await docker.listContainers({ all: true, filters: { label: ['agentry.managed=true'] } })).map((c) => c.Id)
     await guard.prune(active).catch((e: unknown) => log('rule prune failed', String(e)))
   }
 
-  const server = createServer({ config, service, store, backend })
+  const server = createServer({ config, service, store, places })
   await new Promise<void>((resolve) => server.listen(config.port, host, resolve))
   if (config.adminKeyHashes.length > 0) log(`admin page on http://${host}:${String(config.port)}/admin`)
   log(`listening on http://${host}:${String(config.port)} (envd reach: ${config.envdReach}, runtime: ${config.runtime}, egress guard: ${config.egress ? 'on' : 'off'}, limits: ${JSON.stringify({ ...service.limits(), owners: Object.keys(service.limits().owners).length })})`)

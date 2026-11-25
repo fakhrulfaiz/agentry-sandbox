@@ -15,11 +15,19 @@ const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'up
 const ENVD_USER = /^[a-z_][a-z0-9_-]{0,31}$/
 
 export async function relay(service: SandboxService, owner: string, id: string, rest: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  const { baseUrl, token } = await service.endpoint(owner, id)
+  const { baseUrl, token, release } = await service.endpoint(owner, id)
   await service.touch(owner, id)
   // The client may have left while the sandbox was starting.
-  if (req.destroyed || res.destroyed) return
-  const done = service.beginUse(id)
+  if (req.destroyed || res.destroyed) {
+    release?.()
+    return
+  }
+  const endUse = service.beginUse(id)
+  // Frees what the endpoint holds (an SSH tunnel) once the response ends.
+  const done = () => {
+    endUse()
+    release?.()
+  }
   const raw = req.url ?? ''
   const search = raw.includes('?') ? raw.slice(raw.indexOf('?')) : ''
   const target = new URL(`/${rest}${search}`, baseUrl)
@@ -33,6 +41,7 @@ export async function relay(service: SandboxService, owner: string, id: string, 
   const user = req.headers['x-envd-user']
   if (user !== undefined && (typeof user !== 'string' || !ENVD_USER.test(user))) {
     // Never fall back to envd's default user silently.
+    done()
     res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { code: 'invalid_request', message: 'X-Envd-User is not a valid user name' } }))
     return
   }

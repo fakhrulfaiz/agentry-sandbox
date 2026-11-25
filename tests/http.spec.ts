@@ -34,7 +34,7 @@ describe('HTTP API', () => {
     const created = await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'box', template: { image: 'python:3.13', setup_commands: ['echo hi'], resources: { memory_mb: 1024 } } }) })
     expect(created.status).toBe(201)
     const sbx = await json(created)
-    expect(sbx).toMatchObject({ object: 'sandbox', name: 'box', state: 'running', backend: 'fake', image: 'python:3.13', template: { image: 'python:3.13', setup_commands: ['echo hi'], resources: { memory_mb: 1024 } } })
+    expect(sbx).toMatchObject({ object: 'sandbox', name: 'box', state: 'running', backend: 'local', image: 'python:3.13', template: { image: 'python:3.13', setup_commands: ['echo hi'], resources: { memory_mb: 1024 } } })
     expect(typeof sbx.created_at).toBe('number')
     const id = sbx.id as string
     expect(((await json(await s.call('/v1/sandboxes'))).data as unknown[]).length).toBe(1)
@@ -82,7 +82,7 @@ describe('HTTP API', () => {
     const r = await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'box' }) })
     expect(r.status).toBe(503)
     expect((await json(r)).error).toMatchObject({ code: 'backend_unavailable', message: 'Docker is not reachable' })
-    expect((await json(await s.call('/v1/backends'))).data).toEqual([{ kind: 'fake', available: false, reason: 'Docker is not reachable', capabilities: expect.any(Object), default_image: { name: 'agentry/sandbox:1' } }])
+    expect((await json(await s.call('/v1/backends'))).data).toEqual([{ kind: 'fake', available: false, reason: 'Docker is not reachable', capabilities: expect.any(Object), default_image: { name: 'ghcr.io/fakhrulfaiz/agentry-sandbox:1' } }])
   })
 
   it('unknown routes answer 404', async () => {

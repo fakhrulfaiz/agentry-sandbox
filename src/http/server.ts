@@ -9,9 +9,9 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import http from 'node:http'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import type { Backend } from '../backends/types.ts'
+import type { PlaceRegistry } from '../places/registry.ts'
 import type { SandboxConfig } from '../config.ts'
-import { BackendUnavailableError, LimitError, NotFoundError, QuotaExceededError, type SandboxService } from '../sandboxes.ts'
+import { LimitError, NotFoundError, PlaceDisabledError, PlaceUnavailableError, QuotaExceededError, type SandboxService } from '../sandboxes.ts'
 import type { SandboxRecord, Store, TemplateRecord, TemplateSpec } from '../store/types.ts'
 import { relay } from './relay.ts'
 
@@ -191,8 +191,14 @@ async function readJson(req: http.IncomingMessage): Promise<Record<string, unkno
   }
 }
 
-export function createServer(deps: { config: SandboxConfig; service: SandboxService; store: Store; backend: Backend }): http.Server {
-  const { config, service, store, backend } = deps
+export function createServer(deps: { config: SandboxConfig; service: SandboxService; store: Store; places: PlaceRegistry }): http.Server {
+  const { config, service, store, places } = deps
+  /** The default place's driver, as the single "backend" the current routes describe (Task 4 lists every place). */
+  const backendOf = async () => {
+    const { driver } = places.default()
+    const { gpus: _g, ...av } = await driver.probe()
+    return { kind: driver.kind, capabilities: driver.capabilities, available: av, describeImage: driver.describeImage?.bind(driver) }
+  }
   const keyHashes = config.apiKeyHashes.map((k) => Buffer.from(k.slice('sha256:'.length), 'hex'))
   const adminHashes = config.adminKeyHashes.map((k) => Buffer.from(k.slice('sha256:'.length), 'hex'))
   const adminPage = loadAdminPage()
@@ -209,7 +215,8 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
   async function dispatchAdmin(method: string, path: string, body: () => Promise<Record<string, unknown>>): Promise<{ status: number; body?: unknown }> {
     const [, , , a, id, action] = path.split('/')
     if (a === 'overview' && !id && method === 'GET') {
-      const av = await backend.available()
+      const backend = await backendOf()
+      const av = backend.available
       const info = av.ok && backend.describeImage ? await backend.describeImage(config.defaultImage) : undefined
       const all = await service.listEverything()
       const count = (state: string) => all.filter((r) => r.state === state).length
@@ -266,7 +273,8 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
     if (seg[0] !== 'v1') throw new HttpError(404, 'not_found', 'route not found')
     const [, a, id, action, ...rest] = seg
     if (a === 'backends' && !id && method === 'GET') {
-      const av = await backend.available()
+      const backend = await backendOf()
+      const av = backend.available
       const info = av.ok && backend.describeImage ? await backend.describeImage(config.defaultImage) : undefined
       return { status: 200, body: list([{
         kind: backend.kind, available: av.ok, ...(av.ok ? { version: av.version } : { reason: av.reason }), capabilities: backend.capabilities,
@@ -373,7 +381,8 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
       } catch (e) {
         if (e instanceof HttpError) return fail(res, e.status, e.code, e.message)
         if (e instanceof NotFoundError) return fail(res, 404, 'not_found', e.message)
-        if (e instanceof BackendUnavailableError) return fail(res, 503, 'backend_unavailable', e.message)
+        if (e instanceof PlaceUnavailableError) return fail(res, 503, 'backend_unavailable', e.reason)
+        if (e instanceof PlaceDisabledError) return fail(res, 409, 'place_disabled', e.message)
         if (e instanceof QuotaExceededError) return fail(res, 429, 'quota_exceeded', e.message)
         if (e instanceof LimitError) return fail(res, 400, 'invalid_request', e.message)
         const msg = e instanceof Error ? e.message : String(e)
