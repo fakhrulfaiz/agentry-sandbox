@@ -37,6 +37,16 @@ export interface StartContext {
 export interface Driver {
   kind: string
   capabilities: Capabilities
+  /**
+   * The Unix user the agent runs as, when it is an existing one (SSH machine: the login user).
+   * The bootstrap then runs as this user instead of `agent`, creates no user or sudoers entry
+   * and ignores `spec.packages`.
+   */
+  agentUser?: string
+  /** Maps the `X-Envd-User` a caller asked for to the envd user (SSH machine: `agent` becomes the login user). */
+  envdUser?(requested: string): string
+  /** Extra environment for envd's `/init` (SSH machine: `CUDA_VISIBLE_DEVICES` from `handle.gpuIds`). */
+  envdEnv?(handle: Handle): Record<string, string>
   /** Cheap reachability check (no image pulls, no containers). `gpus` are those already discovered. */
   probe(): Promise<Availability & { gpus?: GpuInfo[] }>
   /** Looks for GPUs (may run a container and pull an image), remembers and returns them. Run when a place is added, not per request. */

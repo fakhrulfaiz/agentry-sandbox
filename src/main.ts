@@ -8,6 +8,7 @@ import Docker from 'dockerode'
 import pg from 'pg'
 import { createDockerDriver } from './places/drivers/docker.ts'
 import { dockerSshFactory } from './places/drivers/docker-ssh.ts'
+import { sshMachineFactory } from './places/drivers/ssh-machine.ts'
 import { createPlaceRegistry } from './places/registry.ts'
 import { createNetworkGuard } from './backends/network-guard.ts'
 import { createEnsureImage } from './places/images.ts'
@@ -29,7 +30,7 @@ async function main(): Promise<void> {
   const docker = new Docker()
   const guard = createNetworkGuard(docker, config, createEnsureImage(docker))
   const local = createDockerDriver(config, guard, docker, docker, { ensure: createEnsureImage(docker) })
-  const places = await createPlaceRegistry({ store, config, local, drivers: { 'docker-ssh': dockerSshFactory(config) }, probeTtlMs: 30_000, probeTimeoutMs: 5_000 })
+  const places = await createPlaceRegistry({ store, config, local, drivers: { 'docker-ssh': dockerSshFactory(config), 'ssh-machine': sshMachineFactory(config, { local: docker }) }, probeTtlMs: 30_000, probeTimeoutMs: 5_000 })
   const service = createSandboxService({ store, places, config })
   await service.loadSettings()
 

@@ -93,7 +93,7 @@ export interface SandboxService {
   destroy(owner: string, id: string, opts?: { force?: boolean }): Promise<void>
   touch(owner: string, id: string): Promise<void>
   /** Where to reach the sandbox's envd, and its access token; starts a stopped sandbox. */
-  endpoint(owner: string, id: string): Promise<{ baseUrl: string; token: string; release?: () => void }>
+  endpoint(owner: string, id: string): Promise<{ baseUrl: string; token: string; release?: () => void; /** Maps the requested envd user (SSH machine: `agent` is the login user). */ envdUser?: (requested: string) => string }>
   /** Marks a connection to the sandbox as open; the idle sweep skips it until the returned function is called. */
   beginUse(id: string): () => void
   sweepIdle(): Promise<string[]>
@@ -496,7 +496,7 @@ export function createSandboxService(deps: {
       const r = await locked(id, () => doStart(owner, id))
       const place = placeOf(r)
       const { baseUrl, token, release } = await call(place, () => place.driver.envdEndpoint(r.handle))
-      return { baseUrl, token: token ?? envdToken(config.secret, r.id), ...(release ? { release } : {}) }
+      return { baseUrl, token: token ?? envdToken(config.secret, r.id), ...(release ? { release } : {}), ...(place.driver.envdUser ? { envdUser: place.driver.envdUser.bind(place.driver) } : {}) }
     },
 
     beginUse(id) {

@@ -326,7 +326,7 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
       if (b.kind === 'docker') throw invalid('the local Docker place is built in')
       const cfg = { ...objectField(b.config, 'config') }
       if (b.host_key !== undefined) cfg.host_key = hostKeyField(b.host_key)
-      if (b.kind === 'docker-ssh' && !cfg.host_key) throw invalid('host_key is required: test the connection and confirm the host key first')
+      if ((b.kind === 'docker-ssh' || b.kind === 'ssh-machine') && !cfg.host_key) throw invalid('host_key is required: test the connection and confirm the host key first')
       const secrets = secretsField(b.secrets)
       const driver = buildDriver(b.kind, cfg, secrets)
       let gpus: GpuInfo[] | null = null
@@ -377,7 +377,7 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
         if (b.host_key !== undefined) cfg.host_key = hostKeyField(b.host_key)
         // A save that leaves the key out keeps the pinned one; a remote place never ends up unpinned.
         if (cfg.host_key === undefined && rec.config.host_key !== undefined) cfg.host_key = rec.config.host_key
-        if (rec.kind === 'docker-ssh' && !cfg.host_key) throw invalid('host_key is required: test the connection and confirm the host key first')
+        if ((rec.kind === 'docker-ssh' || rec.kind === 'ssh-machine') && !cfg.host_key) throw invalid('host_key is required: test the connection and confirm the host key first')
         const secrets = b.secrets !== undefined ? secretsField(b.secrets) : undefined
         const effective = secrets ?? (rec.secrets ? openSecrets(config.secret, rec.secrets) : {})
         const candidate = buildDriver(rec.kind, cfg, effective)

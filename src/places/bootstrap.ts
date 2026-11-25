@@ -92,7 +92,9 @@ export async function bootstrap(driver: Driver, id: string, handle: Handle, spec
   try {
     const accessToken = ep.token ?? envdToken(opts.secret, id)
     const envd = createEnvdClient({ baseUrl: ep.baseUrl, accessToken })
-    const base = { accessToken, defaultWorkdir: workspaceOf(spec), ...(spec.env ? { envVars: spec.env } : {}) }
+    const agent = driver.agentUser ?? AGENT
+    const envVars = { ...driver.envdEnv?.(handle), ...spec.env }
+    const base = { accessToken, defaultWorkdir: workspaceOf(spec), ...(Object.keys(envVars).length > 0 ? { envVars } : {}) }
     // The runtime comes from the place's own daemon (its architecture), else from the service's source.
     const source = driver.dshRuntime ? await driver.dshRuntime() : opts.dshRuntime ? { arch: '', tar: opts.dshRuntime } : null
     const baseRef = opts.dshRef ?? 'dsh'
@@ -106,12 +108,12 @@ export async function bootstrap(driver: Driver, id: string, handle: Handle, spec
       if (r.code !== 0) throw new Error(`${what} failed (exit ${String(r.code)}): ${(r.stderr || r.stdout).trim().slice(-500)}`)
     }
     if ((first || copyDsh) && driver.capabilities.runsAsRoot) await envd.init({ ...base, defaultUser: 'root' })
-    if (first) await provision(must, envd, spec, workspaceKept)
+    if (first) await provision(must, envd, spec, workspaceKept, agent, driver.agentUser !== undefined)
     if (copyDsh) {
       await envd.writeFile(DSH_TAR, new Uint8Array(await source!.tar()), 'root')
       await must('root', `set -e; mkdir -p /opt/agentry && rm -rf /opt/agentry/dsh && tar -xf ${DSH_TAR} -C /opt/agentry; rm -f ${DSH_TAR}`, 'installing the DSH runtime')
     }
-    await envd.init({ ...base, defaultUser: AGENT })
+    await envd.init({ ...base, defaultUser: agent })
     const { recreated: _r, ...rest } = handle
     return { ...rest, provisioned: 'true', ...(source !== null ? { dsh: ref } : {}) }
   } finally {
@@ -121,16 +123,21 @@ export async function bootstrap(driver: Driver, id: string, handle: Handle, spec
 
 type Must = (user: string, script: string, what: string, cwd?: string) => Promise<void>
 
-async function provision(must: Must, envd: ReturnType<typeof createEnvdClient>, spec: TemplateSpec, workspaceKept: boolean): Promise<void> {
+async function provision(must: Must, envd: ReturnType<typeof createEnvdClient>, spec: TemplateSpec, workspaceKept: boolean, agent: string, existingUser: boolean): Promise<void> {
   const WORKSPACE = workspaceOf(spec)
-  await must('root', ensureAgent(WORKSPACE), 'creating the agent user')
-  if (spec.packages && spec.packages.length > 0) await must('root', installScript(spec.packages), 'installing packages')
+  if (existingUser) {
+    // A machine's own user: no user or sudoers entry is made, and packages are the operator's business.
+    await must('root', `set -e\nmkdir -p ${sq(WORKSPACE)}\nchown ${sq(`${agent}:`)} ${sq(WORKSPACE)}`, 'preparing the workspace')
+  } else {
+    await must('root', ensureAgent(WORKSPACE), 'creating the agent user')
+    if (spec.packages && spec.packages.length > 0) await must('root', installScript(spec.packages), 'installing packages')
+  }
   // Template files and setup commands live in the workspace volume, which survived: running them again would clobber edits.
   if (workspaceKept) return
   for (const file of spec.files ?? []) {
     const path = file.path.startsWith('/') ? file.path : `${WORKSPACE}/${file.path}`
-    await must(AGENT, `mkdir -p "$(dirname ${sq(path)})"`, `preparing ${file.path}`)
-    await envd.writeFile(path, new TextEncoder().encode(file.content), AGENT)
+    await must(agent, `mkdir -p "$(dirname ${sq(path)})"`, `preparing ${file.path}`)
+    await envd.writeFile(path, new TextEncoder().encode(file.content), agent)
   }
-  for (const command of spec.setupCommands ?? []) await must(AGENT, command, `setup command "${command}"`, WORKSPACE)
+  for (const command of spec.setupCommands ?? []) await must(agent, command, `setup command "${command}"`, WORKSPACE)
 }

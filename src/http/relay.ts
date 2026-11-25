@@ -15,7 +15,7 @@ const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'up
 const ENVD_USER = /^[a-z_][a-z0-9_-]{0,31}$/
 
 export async function relay(service: SandboxService, owner: string, id: string, rest: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  const { baseUrl, token, release } = await service.endpoint(owner, id)
+  const { baseUrl, token, release, envdUser } = await service.endpoint(owner, id)
   try {
     await service.touch(owner, id)
   } catch (e) {
@@ -51,7 +51,7 @@ export async function relay(service: SandboxService, owner: string, id: string, 
     res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: { code: 'invalid_request', message: 'X-Envd-User is not a valid user name' } }))
     return
   }
-  if (typeof user === 'string') headers.authorization = `Basic ${Buffer.from(`${user}:`).toString('base64')}`
+  if (typeof user === 'string') headers.authorization = `Basic ${Buffer.from(`${envdUser ? envdUser(user) : user}:`).toString('base64')}`
 
   await new Promise<void>((resolve) => {
     const upstream = http.request(target, { method: req.method, headers }, (up) => {

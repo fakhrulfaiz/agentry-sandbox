@@ -88,4 +88,24 @@ describe.skipIf(!dockerAvailable)('bootstrap', () => {
     driver.dshRuntime = async () => ({ arch: 'amd64', tar: async () => fakeTar() })
     expect((await bootstrap(driver, 'sbx_b', h, {}, opts)).dsh).toBe('rt-1@amd64')
   }, 120_000)
+
+  it('bootstrap with agentUser creates no users and ignores packages', async () => {
+    const { driver, opts } = setup('sbx_b')
+    driver.agentUser = 'nobody'
+    const h = await bootstrap(driver, 'sbx_b', {}, { packages: ['jq'], files: [{ path: 'a.txt', content: 'hi' }], setupCommands: ['id -un > /workspace/who'] }, opts)
+    expect(h.provisioned).toBe('true')
+    const r = await run('sbx_b', 'root', 'id agent 2>&1; ls /etc/sudoers.d/agent 2>&1; command -v jq || echo nojq; stat -c %U /workspace; cat /workspace/who /workspace/a.txt')
+    expect(r.stdout).toMatch(/no such user/iu)
+    expect(r.stdout).toMatch(/No such file/u)
+    expect(r.stdout).toContain('nojq')
+    expect(r.stdout).toMatch(/nobody\nnobody\nhi$/u)
+  }, 120_000)
+
+  it('GPU assignment reaches CUDA_VISIBLE_DEVICES', async () => {
+    const { driver, opts } = setup('sbx_b')
+    driver.agentUser = 'nobody'
+    driver.envdEnv = (handle) => (handle.gpuIds ? { CUDA_VISIBLE_DEVICES: handle.gpuIds } : {})
+    await bootstrap(driver, 'sbx_b', { gpuIds: 'GPU-aaa,GPU-bbb' }, { env: { OTHER: '1' } }, opts)
+    expect((await run('sbx_b', 'nobody', 'echo $CUDA_VISIBLE_DEVICES $OTHER')).stdout.trim()).toBe('GPU-aaa,GPU-bbb 1')
+  }, 120_000)
 })
