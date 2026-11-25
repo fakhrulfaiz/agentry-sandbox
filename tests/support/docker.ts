@@ -13,6 +13,18 @@ function probe(): boolean {
 
 export const dockerAvailable = probe()
 
+function probeDesktop(): boolean {
+  if (!dockerAvailable) return false
+  try {
+    return execFileSync('docker', ['info', '--format', '{{.OperatingSystem}}'], { stdio: 'pipe', timeout: 10_000 }).toString().includes('Docker Desktop')
+  } catch {
+    return false
+  }
+}
+
+/** True under Docker Desktop (WSL/macOS), where container IPs are unreachable from the host and `host.docker.internal` resolves. */
+export const dockerDesktop = probeDesktop()
+
 let client: Docker | undefined
 export function docker(): Docker {
   client ??= new Docker()

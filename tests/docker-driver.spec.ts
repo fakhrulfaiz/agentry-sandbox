@@ -8,7 +8,7 @@ import { loadConfig, type SandboxConfig } from '../src/config.ts'
 import { createEnvdClient } from '../src/envd/client.ts'
 import { runInEnvd } from '../src/envd/run.ts'
 import { envdToken } from '../src/envd/token.ts'
-import { docker, dockerAvailable } from './support/docker.ts'
+import { docker, dockerAvailable, dockerDesktop } from './support/docker.ts'
 
 const config = (over: Partial<SandboxConfig> = {}): SandboxConfig => ({
   ...loadConfig({ AGENTRY_SANDBOX_DATABASE_URL: 'postgres://x@localhost/x', AGENTRY_SANDBOX_API_KEYS: `sha256:${'a'.repeat(64)}`, AGENTRY_SANDBOX_SECRET: 's'.repeat(32) }),
@@ -149,7 +149,8 @@ describe.skipIf(!dockerAvailable)('docker driver', () => {
     expect(r.stdout).toContain('jq-')
   })
 
-  it('fails within startTimeoutMs when envd never becomes healthy', async () => {
+  // Docker Desktop only: relies on the container IP being unreachable from the host.
+  it.runIf(dockerDesktop)('fails within startTimeoutMs when envd never becomes healthy', async () => {
     // Under Docker Desktop the container IP is not reachable from WSL, so envd never answers on it.
     const cfg = config({ startTimeoutMs: 3_000, envdReach: 'ip' })
     const backend = createDockerBackend(cfg)
@@ -180,7 +181,8 @@ describe.skipIf(!dockerAvailable)('docker driver', () => {
     expect(await docker().listContainers({ all: true, filters: { label: [`agentry.sandbox.id=${id}`] } })).toEqual([])
   })
 
-  it('a start that fails stops the container again (fails closed)', async () => {
+  // Docker Desktop only: relies on the container IP being unreachable from the host.
+  it.runIf(dockerDesktop)('a start that fails stops the container again (fails closed)', async () => {
     const cfg = config()
     const backend = createDockerBackend(cfg)
     const id = newId()
