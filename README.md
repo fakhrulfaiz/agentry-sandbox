@@ -6,7 +6,7 @@ Hardened Docker sandboxes on demand for Agentry agents. Each sandbox is one cont
 
 1. Node 24 + pnpm 11 (`export PATH=$HOME/.nvm/versions/node/v24.19.0/bin:$PATH`), Docker running.
 2. `pnpm install`
-3. `pnpm images:build` — builds `agentry/envd:envd-v0.6.13` (envd from the pinned upstream commit), `agentry/dsh-runtime:0.2.2-rc.1` (DeepSeek Harness's remote helper and Node, injected into every sandbox at `/opt/agentry/dsh`), `agentry/sandbox:1` (default image) and `agentry/netguard:1` (firewall helper).
+3. `pnpm images:build` — builds `ghcr.io/fakhrulfaiz/agentry-envd:envd-v0.6.13` (envd from the pinned upstream commit), `ghcr.io/fakhrulfaiz/agentry-dsh-runtime:0.2.2-rc.1` (DeepSeek Harness's remote helper and Node, injected into every sandbox at `/opt/agentry/dsh`), `ghcr.io/fakhrulfaiz/agentry-sandbox:1` (default image) and `ghcr.io/fakhrulfaiz/agentry-netguard:1` (firewall helper). The same images are published (linux/amd64 and linux/arm64) to GHCR by `.github/workflows/images.yml` on every push to `main`; remote Docker places pull them from there, so a remote host needs no local build.
 4. A Postgres database: `createdb agentry_sandbox` (migrations run at startup).
 5. Environment:
 
@@ -21,8 +21,8 @@ Hardened Docker sandboxes on demand for Agentry agents. Each sandbox is one cont
    | `AGENTRY_SANDBOX_EGRESS` | `on` | the network guard |
    | `AGENTRY_SANDBOX_IDLE_MINUTES` | `30` | idle sandboxes are stopped (not deleted) |
    | `AGENTRY_SANDBOX_CPUS` / `_MEMORY_MB` / `_PIDS` | `2` / `4096` / `4096` | per-sandbox limits |
-   | `AGENTRY_SANDBOX_DEFAULT_IMAGE` / `_ENVD_IMAGE` | `agentry/sandbox:1` / `agentry/envd:envd-v0.6.13` | |
-   | `AGENTRY_SANDBOX_DSH_RUNTIME_IMAGE` | `agentry/dsh-runtime:0.2.2-rc.1` | DSH remote helper injected into each sandbox; `none` disables (the Agentry API's tools then cannot run there) |
+   | `AGENTRY_SANDBOX_DEFAULT_IMAGE` / `_ENVD_IMAGE` | `ghcr.io/fakhrulfaiz/agentry-sandbox:1` / `ghcr.io/fakhrulfaiz/agentry-envd:envd-v0.6.13` | |
+   | `AGENTRY_SANDBOX_DSH_RUNTIME_IMAGE` | `ghcr.io/fakhrulfaiz/agentry-dsh-runtime:0.2.2-rc.1` | DSH remote helper injected into each sandbox; `none` disables (the Agentry API's tools then cannot run there) |
 
    **Limits** (so no caller or agent can run away with resources; going over one answers 429 `quota_exceeded` with the reason):
 

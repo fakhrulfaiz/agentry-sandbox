@@ -4,6 +4,13 @@
 
 
 
+## 2026-11-25 — places
+
+- Places: one service can run sandboxes on several places. A place is a Docker host (local, remote over SSH with a pinned host key) with its connection secrets stored encrypted; each sandbox runs on its place. Docker and bootstrap code is shared through a driver and one bootstrap routine.
+- Admin page: a Places section to add, edit, test and remove places; `/v1/places` and admin places endpoints.
+- GPUs on Docker places are assigned exclusively: a sandbox holds its GPUs until it is deleted.
+- Images are now `ghcr.io/fakhrulfaiz/agentry-{envd,dsh-runtime,sandbox,netguard}`, published multi-arch (amd64, arm64) by GitHub Actions on `main`; the envd and sandbox Dockerfiles follow `TARGETARCH`. Remote Docker places pull these images. CI runs typecheck and tests (with Postgres) on `develop` and pull requests to `main`.
+
 ## 2026-11-25 — failed creates leave nothing behind
 
 - A create whose setup fails (or that the backend cannot finish) now removes its record and asks the backend to clean up, instead of keeping a `failed` sandbox the caller never learned the id of. The reason still comes back to the caller; the sandbox no longer counts against the owner's limits.

@@ -2,6 +2,7 @@
 # into every container, so any image works as a template.
 FROM debian:bookworm-slim
 
+ARG TARGETARCH
 ARG NODE_VERSION=24.21.0
 ARG PNPM_VERSION=11.28.5
 
@@ -12,7 +13,8 @@ RUN apt-get update \
       unzip xz-utils procps less nano jq \
  && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+RUN case "${TARGETARCH:-amd64}" in arm64) NODE_ARCH=arm64 ;; *) NODE_ARCH=x64 ;; esac \
+ && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
     | tar -xJ -C /usr/local --strip-components=1 \
  && npm install -g "pnpm@${PNPM_VERSION}" \
  && node -v && pnpm -v
