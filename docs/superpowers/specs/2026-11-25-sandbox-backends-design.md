@@ -181,23 +181,38 @@ The relay is unchanged except that `service.endpoint()` asks the sandbox's place
 
 ### Kind: SSH machine (work directly on an existing box)
 
-- Place config `{ host, port, user, sshKey (secret), hostKey (pinned) }`.
-  Capabilities: `persistent: true`, `reset: false`, `isolated: false`, `network: false`,
-  `resources: false`, `gpu` = whatever the machine has (probe runs `nvidia-smi`), `runsAsRoot: false`.
-- `start`: open an SSH connection, upload envd (sftp) unless already present with the right hash,
-  start it **as the login user** on a loopback port, forward that port. `stop`: kill that envd,
-  close the connection. `destroy`: remove the sandbox's workspace directory only (never anything
-  else on the machine). `create` claims nothing on the machine beyond that directory.
-- Users: envd started as a non-root user cannot switch users, so for this kind the relay maps any
-  requested envd user (`agent`, `root`) to the login user; provisioning skips user creation and
-  runs package installs with `sudo -n` when allowed, else fails naming the packages.
-- Workspace path: the API needs the sandbox workspace at the same absolute path it uses
-  (`<AGENTRY_WORKSPACES>/<owner>/sandbox-<envId>`). On the machine the service creates it with
-  `mkdir -p` (or `sudo -n mkdir -p` + `chown` when the path is not writable), else the create fails
-  naming the path. The path is never rewritten: DSH needs the identical absolute path on both sides,
-  so the operator picks an `AGENTRY_WORKSPACES` (API) that the machine's user can create.
-- Admin page shows a plain warning on this kind: agents get the login user's full access to the
-  machine; there is no isolation between sandboxes on it.
+*Revised 2026-11-25 after a spike: unmodified envd cannot start any process unless it runs as root
+(it always switches credentials; as a normal user every command fails with `fork/exec /bin/sh:
+operation not permitted`). The operator chose to run envd with passwordless sudo (option A); a
+patched envd for machines without sudo is on the operator's personal backlog.*
+
+- Place kind `ssh-machine`. Config `{ url: 'ssh://user@host[:port]', host_key }`, secrets
+  `{ private_key }` (the same shape and admin flow as `docker-ssh`).
+- Requirements on the machine: Linux (x86_64 or aarch64), glibc, and **passwordless sudo** for the
+  login user (`probe` checks `sudo -n true` and reports "passwordless sudo is required" otherwise).
+- Capabilities: `persistent: true`, `reset: false`, `isolated: false`, `network: false`,
+  `resources: false`, `envdBuiltIn: false`, `runsAsRoot: true`, `gpu` from `nvidia-smi` on the
+  machine; template fields `setupCommands`, `env`, `files`, `gpus` only (no images, no system
+  packages: it is the operator's own machine).
+- **The agent runs as the login user**, never as a created `agent` user: the shared bootstrap does
+  not create users or sudoers entries on this kind; the relay maps a requested `X-Envd-User` of
+  `agent` to the login user (`root` stays root, which that user can reach with sudo anyway).
+- `create`/`start`: over SSH, upload envd for the machine's architecture to
+  `~/.agentry/bin/envd-<version>-<arch>` (skipped when the sha256 matches), create the sandbox's
+  workspace (the API's path, `sudo -n mkdir -p` + `chown` to the login user), pick a free loopback
+  port, and start envd detached with `sudo -n` on `127.0.0.1:<port>`, recording
+  `~/.agentry/sandboxes/<id>/{meta.json,envd.pid,envd.log}`; reach it through an SSH tunnel.
+  DSH's runtime for that architecture is copied by the shared bootstrap as everywhere else.
+- `stop` kills that envd; `destroy` stops it and removes exactly the recorded workspace directory
+  and `~/.agentry/sandboxes/<id>/` (never anything else); `status` is "running" when the pid is alive
+  and envd answers through the tunnel; `listManaged` reads the `meta.json` files.
+- GPUs: exclusive like everywhere (§ GPU sharing); the assignment reaches the agent as
+  `CUDA_VISIBLE_DEVICES=<uuids>` in envd's environment (a convention: the login user can still see
+  every GPU).
+- envd and DSH's runtime for the machine's architecture come from their multi-arch images, read
+  through the service host's local Docker with an explicit platform.
+- Admin page warning: agents get the login user's full access (and its sudo) on that machine; there
+  is no isolation between sandboxes on it.
 
 ### Kind: E2B
 
