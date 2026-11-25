@@ -6,7 +6,9 @@
  */
 import type Docker from 'dockerode'
 
-export type EnsureImage = (image: string) => Promise<void>
+export type Platform = 'linux/amd64' | 'linux/arm64'
+
+export type EnsureImage = (image: string, platform?: Platform) => Promise<void>
 
 const isNotFound = (e: unknown) => (e as { statusCode?: number }).statusCode === 404
 
@@ -29,16 +31,17 @@ export function legacyName(image: string): string | undefined {
  * earlier `agentry/<name>` image when this daemon has it.
  */
 export function createEnsureImage(client: Docker, puller: Docker = client): EnsureImage {
-  return async (image) => {
+  return async (image, platform) => {
     try {
-      await client.getImage(image).inspect()
-      return
+      const info = await client.getImage(image).inspect()
+      // A requested platform must match the stored image's architecture.
+      if (!platform || `${info.Os}/${info.Architecture}` === platform) return
     } catch (e) {
       if (!isNotFound(e)) throw e
     }
     try {
       // Without any credential helper (public images; a configured registry login would go in authconfig).
-      const stream = await puller.pull(image, {})
+      const stream = await puller.pull(image, platform ? { platform } : {})
       await new Promise<void>((resolve, reject) => puller.modem.followProgress(stream, (err) => (err ? reject(err) : resolve())))
       return
     } catch (pullError) {

@@ -7,17 +7,21 @@ ARG DSH_VERSION=0.2.2-rc.1
 ARG NODE_VERSION=24.21.0
 
 FROM debian:bookworm-slim AS builder
+ARG TARGETARCH
 ARG DSH_VERSION
 ARG NODE_VERSION
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl xz-utils python3 make g++ \
  && apt-get clean
-RUN mkdir -p /opt/agentry/dsh \
- && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+# TARGETARCH is amd64 or arm64; Node names them x64 and arm64.
+RUN NODE_ARCH=$([ "${TARGETARCH}" = "arm64" ] && echo arm64 || echo x64) \
+ && mkdir -p /opt/agentry/dsh \
+ && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
     | tar -xJ -C /tmp \
- && cp "/tmp/node-v${NODE_VERSION}-linux-x64/bin/node" /opt/agentry/dsh/node \
- && cp "/tmp/node-v${NODE_VERSION}-linux-x64/LICENSE" /opt/agentry/dsh/NODE-LICENSE
-ENV PATH=/tmp/node-v${NODE_VERSION}-linux-x64/bin:$PATH
+ && mv "/tmp/node-v${NODE_VERSION}-linux-${NODE_ARCH}" /tmp/node \
+ && cp /tmp/node/bin/node /opt/agentry/dsh/node \
+ && cp /tmp/node/LICENSE /opt/agentry/dsh/NODE-LICENSE
+ENV PATH=/tmp/node/bin:$PATH
 WORKDIR /opt/agentry/dsh
 RUN printf '{"name":"agentry-dsh-runtime","private":true,"type":"module"}\n' > package.json \
  && npm install --no-audit --no-fund --omit=dev --foreground-scripts \

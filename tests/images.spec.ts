@@ -49,3 +49,13 @@ describe('image names', () => {
     expect(wf).toContain('linux/amd64,linux/arm64')
   })
 })
+
+describe('dsh-runtime Dockerfile', () => {
+  it('uses TARGETARCH to pick the Node tarball', () => {
+    const f = readFileSync(new URL('../images/dsh-runtime/Dockerfile', import.meta.url), 'utf8')
+    expect(f).toContain('ARG TARGETARCH')
+    expect(f).toMatch(/arm64/)
+    expect(f).toContain('linux-${NODE_ARCH}.tar.xz')
+    expect(f).not.toContain('linux-x64')
+  })
+})
