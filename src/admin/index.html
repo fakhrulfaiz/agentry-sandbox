@@ -5,69 +5,102 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sandbox admin</title>
 <style>
+/* Console: a deep-ink sidebar beside a pale work area. Panels are flat (one line, no shadow); the overview's capacity bars are the one visual flourish. */
 :root {
-  --bg: #f6f7f9; --panel: #ffffff; --ink: #111827; --muted: #5b6474; --line: #e3e6eb;
-  --accent: #2563eb; --accent-ink: #ffffff; --ok: #15803d; --warn: #b45309; --bad: #b91c1c; --soft: #eef2f8;
+  --bg: #f2f4f7; --panel: #ffffff; --ink: #172033; --muted: #596579; --line: #dfe3ea; --soft: #eef1f6;
+  --accent: #0f766e; --accent-ink: #ffffff; --ok: #15803d; --warn: #b45309; --bad: #b91c1c;
+  --side: #121c2b; --side-ink: #b4bfd0; --side-hover: #1b2a3f; --side-on: #223552; --side-line: #24324a; --mark: #2dd4bf;
   --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #14171c; --panel: #1b1f26; --ink: #e7eaef; --muted: #9aa3b2; --line: #2b313b; --accent: #5b8ef5; --soft: #222833; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; }
+  :root { --bg: #0e141c; --panel: #151d28; --ink: #e5e9f0; --muted: #96a1b3; --line: #263041; --soft: #1c2634; --accent: #2dd4bf; --accent-ink: #052e2a; --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --side: #0a1018; --side-hover: #131c2a; --side-on: #1b2a3f; --side-line: #1a2434; }
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Inter, sans-serif; }
-header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
-header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: -0.01em; white-space: nowrap; }
-header button, .pill { white-space: nowrap; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Inter, sans-serif; }
+[hidden] { display: none !important; }
+
+/* Shell */
+#console { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+#side { background: var(--side); color: var(--side-ink); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; padding: 16px 12px; gap: 4px; }
+#side .brand { display: flex; align-items: center; gap: 10px; padding: 4px 10px 18px; color: #fff; font-weight: 650; font-size: 15px; letter-spacing: -0.01em; }
+#side .brand svg { width: 22px; height: 22px; color: var(--mark); flex: none; }
+#side a { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 6px; color: inherit; text-decoration: none; font-size: 14px; border-left: 2px solid transparent; }
+#side a:hover { background: var(--side-hover); color: #fff; }
+#side a[aria-current="page"] { background: var(--side-on); color: #fff; border-left-color: var(--mark); }
+#side a svg { width: 18px; height: 18px; flex: none; opacity: .85; }
+#side a .grow { flex: 1; }
+#side a .n { font-size: 12px; color: var(--side-ink); font-variant-numeric: tabular-nums; }
+#side .foot { margin-top: auto; padding: 12px 10px 0; border-top: 1px solid var(--side-line); font-size: 12px; color: var(--side-ink); }
+#content { min-width: 0; display: flex; flex-direction: column; }
+header { display: flex; align-items: center; gap: 16px; padding: 0 28px; height: 56px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: -0.01em; white-space: nowrap; }
 header .grow { flex: 1; }
-main { max-width: 1120px; margin: 0 auto; padding: 24px 16px 64px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px; }
+main { width: 100%; max-width: 1180px; padding: 24px 28px 64px; display: grid; gap: 20px; }
 main > * { min-width: 0; }
-h2 { font-size: 18px; margin: 0 0 4px; letter-spacing: -0.01em; }
-.lede { color: var(--muted); margin: 0 0 14px; font-size: 14px; }
-section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
-button { font: inherit; font-size: 14px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 6px 12px; cursor: pointer; }
+h2 { font-size: 15px; margin: 0 0 4px; }
+section > h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+h3 { font-size: 14px; margin: 0 0 4px; }
+.lede { color: var(--muted); margin: 0 0 16px; font-size: 14px; max-width: 72ch; }
+section[data-view] { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px; }
+
+/* Controls */
+button { font: inherit; font-size: 13px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 6px 12px; cursor: pointer; white-space: nowrap; }
 button:hover { background: var(--soft); }
-button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-button.primary:hover { filter: brightness(1.08); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 550; }
+button.primary:hover { filter: brightness(1.1); background: var(--accent); }
 button.danger { color: var(--bad); }
 button:disabled { opacity: .5; cursor: default; }
-button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-input, select { font: inherit; font-size: 14px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; }
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--mark); outline-offset: 2px; }
+input, select, textarea { font: inherit; font-size: 14px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
 input[type=number] { width: 110px; font-variant-numeric: tabular-nums; }
-.pill { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--muted); }
+textarea { font-family: var(--mono); font-size: 13px; resize: vertical; }
+.pill { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--muted); white-space: nowrap; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.running, .dot.ok { background: var(--ok); } .dot.stopped { background: var(--muted); } .dot.provisioning, .dot.deleting { background: var(--warn); } .dot.failed, .dot.bad { background: var(--bad); }
 .mono { font-family: var(--mono); font-size: 13px; }
 .muted { color: var(--muted); }
-.banner { border-radius: 8px; padding: 10px 14px; font-size: 14px; border: 1px solid; }
+.banner { border-radius: 6px; padding: 10px 14px; font-size: 14px; border: 1px solid var(--line); background: var(--soft); }
 .banner.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); background: color-mix(in srgb, var(--bad) 8%, transparent); }
 .banner.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: color-mix(in srgb, var(--ok) 8%, transparent); }
 
 /* Sign in */
-#signin { max-width: 420px; margin: 12vh auto; }
+#signin { max-width: 400px; margin: 14vh auto; padding: 0 16px; }
+#signin section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 24px; }
+#signin h2 { position: static; width: auto; height: auto; clip-path: none; font-size: 18px; margin-bottom: 8px; }
 #signin form { display: grid; gap: 12px; }
 #signin input { width: 100%; }
 
-/* Overview: the counts are the one big thing on the page. */
-.counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-.count { background: var(--panel); padding: 14px 16px; }
-.count b { display: block; font-size: 30px; line-height: 1.1; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+/* Overview: counts as a strip, capacity as bars. */
+.counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.count { background: var(--panel); padding: 12px 16px; }
+.count b { display: block; font-size: 26px; line-height: 1.15; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
 .count span { font-size: 13px; color: var(--muted); }
-.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 24px; margin-top: 16px; font-size: 14px; }
+.usage { display: grid; gap: 14px; margin: 22px 0 4px; max-width: 560px; }
+.usage .row { display: grid; gap: 6px; }
+.usage .head { display: flex; justify-content: space-between; font-size: 13px; }
+.usage .head b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.usage .bar { height: 8px; border-radius: 4px; background: var(--soft); overflow: hidden; }
+.usage .bar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 4px; }
+.usage .bar i.warn { background: var(--warn); } .usage .bar i.bad { background: var(--bad); }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px 28px; margin: 22px 0 0; padding-top: 18px; border-top: 1px solid var(--line); }
 .facts dt { color: var(--muted); font-size: 13px; }
 .facts dd { margin: 0; }
+@media (prefers-reduced-motion: no-preference) { .usage .bar i { transition: width .35s ease; } button { transition: background-color .12s; } }
 
-/* Sandboxes */
+/* Tables */
 .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
 .toolbar .grow { flex: 1; }
-.table-wrap { overflow-x: auto; max-width: 100%; }
+.table-wrap { overflow-x: auto; margin: 0 -20px; padding: 0 20px; }
 #filter { flex: 1 1 260px; min-width: 0; max-width: 360px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th { text-align: left; font-weight: 550; color: var(--muted); font-size: 13px; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-td { padding: 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { text-align: left; font-weight: 600; color: var(--muted); font-size: 13px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--soft); white-space: nowrap; }
+th:first-child { border-top-left-radius: 6px; } th:last-child { border-top-right-radius: 6px; }
+td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+tbody tr:hover td { background: color-mix(in srgb, var(--soft) 55%, transparent); }
 tr:last-child td { border-bottom: 0; }
 td.actions { white-space: nowrap; text-align: right; }
-td.actions button { padding: 4px 10px; font-size: 13px; margin-left: 4px; }
-.empty { color: var(--muted); padding: 18px 10px; }
+td.actions button { padding: 3px 10px; font-size: 12px; margin-left: 4px; }
+.empty { color: var(--muted); padding: 22px 12px; text-align: center; }
 
 /* Limits */
 .limits { display: grid; gap: 0; }
@@ -77,36 +110,36 @@ td.actions button { padding: 4px 10px; font-size: 13px; margin-left: 4px; }
 .limit .help { color: var(--muted); font-size: 13px; grid-column: 1; }
 .limit .field { grid-row: 1 / span 2; grid-column: 2; display: flex; align-items: center; gap: 10px; }
 .limit .changed { font-size: 12px; color: var(--accent); }
-.owners { margin-top: 18px; }
-.owners h3 { font-size: 15px; margin: 0 0 4px; }
+.owners { margin-top: 22px; }
 .owners td input[type=text] { width: 100%; min-width: 140px; }
-.savebar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 18px; }
+.savebar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
 .savebar .grow { flex: 1; }
-#place-form { margin-top: 14px; display: grid; gap: 8px; max-width: 520px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+
+/* Forms */
+#place-form { margin-top: 14px; display: grid; gap: 8px; max-width: 520px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
 #place-form h3 { margin: 0 0 4px; font-size: 15px; }
 #place-form label { font-size: 13px; color: var(--muted); }
 #place-form label.check { display: flex; gap: 8px; align-items: flex-start; color: var(--ink); margin-top: 8px; }
 #place-form label.check input { margin-top: 3px; }
 #place-form input[type=text], #place-form textarea { width: 100%; }
-textarea { font: inherit; font-family: ui-monospace, monospace; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; resize: vertical; }
-textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (max-width: 640px) {
-  header { padding: 12px 16px; }
-  section { padding: 16px; }
+
+@media (max-width: 860px) {
+  #console { grid-template-columns: minmax(0, 1fr); }
+  #side { position: static; height: auto; flex-direction: row; align-items: center; overflow-x: auto; padding: 8px 12px; gap: 4px; }
+  #side .brand { padding: 4px 10px; }
+  #side .foot { display: none; }
+  #side a { border-left: 0; border-bottom: 2px solid transparent; white-space: nowrap; }
+  #side a[aria-current="page"] { border-bottom-color: var(--mark); }
+  header { padding: 0 16px; position: static; }
+  main { padding: 16px 16px 48px; }
+  section[data-view] { padding: 16px; }
+  .table-wrap { margin: 0 -16px; padding: 0 16px; }
   .limit { grid-template-columns: 1fr; }
   .limit .field { grid-row: auto; grid-column: 1; }
 }
-@media (prefers-reduced-motion: no-preference) { button { transition: background-color .12s; } }
 </style>
 </head>
 <body>
-<header>
-  <h1>Agentry Sandbox</h1>
-  <span class="pill" id="health" hidden><span class="dot" id="health-dot"></span><span id="health-text"></span></span>
-  <span class="grow"></span>
-  <button id="signout" hidden>Sign out</button>
-</header>
-
 <div id="signin" hidden>
   <section>
     <h2>Sign in</h2>
@@ -119,17 +152,35 @@ textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; 
   </section>
 </div>
 
-<main id="app" hidden>
+<div id="console" hidden>
+<nav id="side" aria-label="Sections">
+  <div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 3 7.5v9L12 21l9-4.5v-9L12 3Z"/><path d="m3 7.5 9 4.5 9-4.5M12 12v9"/></svg>Agentry Sandbox</div>
+  <a href="#/overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13h6V4H4v9Zm10 7h6V4h-6v16ZM4 20h6v-3H4v3Z"/></svg><span class="grow">Overview</span></a>
+  <a href="#/sandboxes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg><span class="grow">Sandboxes</span><span class="n" id="nav-sandboxes"></span></a>
+  <a href="#/places"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg><span class="grow">Places</span><span class="n" id="nav-places"></span></a>
+  <a href="#/keys"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="m11 12 9-9m-3 3 3 3m-6-0 2 2"/></svg><span class="grow">Access keys</span><span class="n" id="nav-keys"></span></a>
+  <a href="#/limits"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span class="grow">Limits</span></a>
+  <div class="foot">Admin key kept in this tab only.</div>
+</nav>
+<div id="content">
+<header>
+  <h1 id="page-title">Overview</h1>
+  <span class="pill" id="health" hidden><span class="dot" id="health-dot"></span><span id="health-text"></span></span>
+  <span class="grow"></span>
+  <button id="signout" hidden>Sign out</button>
+</header>
+<main id="app">
   <div id="error" class="banner bad" role="alert" hidden></div>
 
-  <section aria-labelledby="overview-h">
+  <section data-view="overview" aria-labelledby="overview-h">
     <h2 id="overview-h">Overview</h2>
     <p class="lede">What the service is running now. Refreshes every 5 seconds.</p>
     <div class="counts" id="counts"></div>
+    <div class="usage" id="usage" aria-label="Capacity"></div>
     <dl class="facts" id="facts"></dl>
   </section>
 
-  <section aria-labelledby="sandboxes-h">
+  <section data-view="sandboxes" aria-labelledby="sandboxes-h">
     <h2 id="sandboxes-h">Sandboxes</h2>
     <p class="lede">Every user's sandboxes. Stopping keeps files and software; deleting removes the sandbox and its files.</p>
     <div class="toolbar">
@@ -148,7 +199,27 @@ textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; 
     </div>
   </section>
 
-  <section id="places" aria-labelledby="places-h">
+  <section id="keys" data-view="keys" aria-labelledby="keys-h">
+    <h2 id="keys-h">Access keys</h2>
+    <p class="lede">A key tied to one user lets a person or tool (Claude Code, Cursor, any MCP client) use that user's sandboxes: point the client at <span class="mono">/mcp</span> on this service with <span class="mono">Authorization: Bearer &lt;key&gt;</span>. Use the same user name as in Agentry to share its sandboxes and limits. A key is shown once.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>User</th><th>Created</th><th><span class="muted">Actions</span></th></tr></thead>
+        <tbody id="key-rows"></tbody>
+      </table>
+    </div>
+    <form id="key-form" autocomplete="off" class="toolbar" style="margin-top:12px">
+      <input id="key-name" type="text" required maxlength="200" placeholder="Name, such as Claude Code" aria-label="Key name">
+      <input id="key-owner" type="text" required maxlength="200" placeholder="User" aria-label="User the key acts as" spellcheck="false">
+      <button type="submit" class="primary">Create key</button>
+    </form>
+    <div id="key-new" class="banner" role="status" hidden>
+      <div>Copy this key now; it is not shown again.</div>
+      <div class="mono" id="key-new-value" style="user-select:all;word-break:break-all"></div>
+    </div>
+  </section>
+
+  <section id="places" data-view="places" aria-labelledby="places-h">
     <h2 id="places-h">Places</h2>
     <p class="lede">Where sandboxes run. The built-in place is Docker on this machine; add other machines reachable over SSH, either running Docker or used directly as a machine. New sandboxes go to the default place unless the template names another.</p>
     <div class="table-wrap">
@@ -201,7 +272,7 @@ textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; 
     </form>
   </section>
 
-  <section aria-labelledby="limits-h">
+  <section data-view="limits" aria-labelledby="limits-h">
     <h2 id="limits-h">Limits</h2>
     <p class="lede">Changes apply at once, to new requests, and survive restarts. Reset returns every limit to the service's environment settings.</p>
     <div class="limits" id="limits"></div>
@@ -224,6 +295,8 @@ textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; 
     </div>
   </section>
 </main>
+</div>
+</div>
 
 <script>
 'use strict'
@@ -286,6 +359,13 @@ async function loadOverview() {
   const c = o.counts
   $('counts').replaceChildren(...[[c.running, 'Running'], [c.stopped, 'Stopped'], [c.provisioning, 'Setting up'], [c.failed, 'Failed'], [c.total, 'All sandboxes'], [c.owners, 'Users']]
     .map(([n, label]) => el('div', { class: 'count' }, el('b', {}, n), el('span', {}, label))))
+  $('nav-sandboxes').textContent = c.total
+  try {
+    const lim = (await call('GET', '/v1/admin/limits')).limits
+    $('usage').replaceChildren(
+      usageRow('Running now', c.running, lim.maxRunningTotal),
+      usageRow('Sandboxes on the service', c.total, lim.maxTotal))
+  } catch { $('usage').replaceChildren() }
   const img = b.default_image ?? {}
   const runtimes = Object.entries(img.runtimes ?? {}).map(([k, v]) => `${k} ${v}`).join(', ')
   const cfg = o.config
@@ -297,6 +377,14 @@ async function loadOverview() {
     ...fact('Network guard', cfg.egress ? 'On: internet only, no private networks' : 'Off (debugging only)'),
     ...fact('Container runtime', cfg.runtime === 'runsc' ? 'gVisor (runsc)' : 'runc'),
   )
+}
+function usageRow(label, n, max) {
+  const pct = max > 0 ? Math.min(100, Math.round((n / max) * 100)) : 0
+  const bar = el('i', { class: pct >= 100 ? 'bad' : pct >= 80 ? 'warn' : '' })
+  bar.style.width = `${pct}%`
+  return el('div', { class: 'row' },
+    el('div', { class: 'head' }, el('span', {}, label), el('b', {}, `${n} of ${max}`)),
+    el('div', { class: 'bar', role: 'img', 'aria-label': `${label}: ${n} of ${max}` }, bar))
 }
 function fact(label, value) { return [el('div', {}, el('dt', {}, label), el('dd', {}, value))] }
 
@@ -353,6 +441,7 @@ let editing = null // place being edited, or null when adding
 let tested = null // { host_key } from the last successful test of the current form values
 async function loadPlaces() {
   placeList = (await call('GET', '/v1/admin/places')).data
+  $('nav-places').textContent = placeList.length
   renderPlaces()
 }
 function gpuText(g) { return g && g.count > 0 ? `${g.count} × ${g.models.join(', ')}` : 'None' }
@@ -546,14 +635,56 @@ async function resetLimits() {
 }
 function flash(text, bad = false) { const s = $('limits-status'); s.textContent = text; s.style.color = bad ? 'var(--bad)' : 'var(--ok)' }
 
+
+// ---------- access keys ----------
+async function loadKeys() {
+  const keys = (await call('GET', '/v1/admin/keys')).data
+  $('nav-keys').textContent = keys.length || ''
+  $('key-rows').replaceChildren(...(keys.length === 0
+    ? [el('tr', {}, el('td', { colspan: '4', class: 'empty' }, 'No access keys yet.'))]
+    : keys.map((k) => el('tr', {},
+      el('td', {}, k.name),
+      el('td', {}, k.owner),
+      el('td', {}, new Date(k.created_at * 1000).toLocaleString()),
+      el('td', { class: 'actions' }, el('button', { class: 'danger', onclick: () => revokeKey(k) }, 'Revoke'))))))
+}
+async function revokeKey(k) {
+  if (!confirm(`Revoke "${k.name}"? Anything using this key stops working.`)) return
+  try { await call('DELETE', `/v1/admin/keys/${encodeURIComponent(k.id)}`); showError(''); await loadKeys() } catch (e) { showError(e.message) }
+}
+async function createKey(ev) {
+  ev.preventDefault()
+  try {
+    const made = await call('POST', '/v1/admin/keys', { name: $('key-name').value.trim(), owner: $('key-owner').value.trim() })
+    $('key-new-value').textContent = made.key
+    $('key-new').hidden = false
+    $('key-name').value = ''
+    showError('')
+    await loadKeys()
+  } catch (e) { showError(e.message) }
+}
+
+// ---------- navigation ----------
+const VIEWS = { overview: 'Overview', sandboxes: 'Sandboxes', places: 'Places', keys: 'Access keys', limits: 'Limits' }
+function route() {
+  const asked = location.hash.replace(/^#\/?/, '')
+  const view = asked in VIEWS ? asked : 'overview'
+  for (const section of document.querySelectorAll('section[data-view]')) section.hidden = section.dataset.view !== view
+  for (const a of document.querySelectorAll('#side a')) a.getAttribute('href') === `#/${view}` ? a.setAttribute('aria-current', 'page') : a.removeAttribute('aria-current')
+  $('page-title').textContent = VIEWS[view]
+  document.title = `${VIEWS[view]} · Sandbox admin`
+}
+window.addEventListener('hashchange', route)
+
 // ---------- session ----------
 async function refresh() {
-  try { await Promise.all([loadOverview(), loadSandboxes(), loadPlaces()]); showError('') } catch (e) { if (e.message !== 'signed out') showError(e.message) }
+  try { await Promise.all([loadOverview(), loadSandboxes(), loadPlaces(), loadKeys()]); showError('') } catch (e) { if (e.message !== 'signed out') showError(e.message) }
 }
 async function start() {
   $('signin').hidden = true
-  $('app').hidden = false
+  $('console').hidden = false
   $('signout').hidden = false
+  route()
   await Promise.all([refresh(), loadLimits().catch((e) => showError(e.message))])
   clearInterval(timer)
   timer = setInterval(() => { if (!document.hidden) void refresh() }, 5000)
@@ -561,7 +692,7 @@ async function start() {
 function signOut(message) {
   store.set(null)
   clearInterval(timer)
-  $('app').hidden = true
+  $('console').hidden = true
   $('signout').hidden = true
   $('health').hidden = true
   $('signin').hidden = false
@@ -581,6 +712,7 @@ $('place-hostkey-confirm').addEventListener('change', updatePlaceSave)
 for (const id of ['place-url', 'place-key', 'place-template', 'place-timeout']) $(id).addEventListener('input', resetPlaceTest)
 $('place-kind').addEventListener('change', () => { showKindWarning(); resetPlaceTest() })
 $('add-owner').addEventListener('click', () => { $('no-owners')?.remove(); $('owner-rows').append(ownerRow()) })
+$('key-form').addEventListener('submit', (ev) => void createKey(ev))
 $('save-limits').addEventListener('click', () => void saveLimits())
 $('reset-limits').addEventListener('click', () => void resetLimits())
 store.get() ? void start() : signOut()

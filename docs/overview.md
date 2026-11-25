@@ -71,6 +71,16 @@ Places are added on the admin page, not in the web app: they need credentials (S
 - A chat attached to a sandbox environment runs its DSH tools there. Any chat can also manage sandboxes through the `sandbox_*` tools (create, exec, start, stop, delete, `sandbox_pull`, `sandbox_push`); creating or deleting asks the user first.
 - The web app shows environments, templates, providers and places, starts and stops sandboxes, browses files, and opens terminals, all through the API.
 
+## Using it from other tools (MCP)
+
+Any MCP client (Claude Code, Cursor, another harness) can use the same sandboxes:
+
+1. On the admin page, **Access keys**: create a key for a user. It is shown once and stored only as a hash. Use the same user name as in Agentry to share that user's sandboxes and limits.
+2. Point the client at `http://<host>:<port>/mcp` (streamable HTTP, JSON responses) with `Authorization: Bearer <key>`. For Claude Code: `claude mcp add --transport http sandbox http://<host>:<port>/mcp --header "Authorization: Bearer <key>"`.
+3. Tools: `sandbox_list`, `sandbox_create`, `sandbox_start`, `sandbox_stop`, `sandbox_delete`, `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`.
+
+A key acts only as its owner, on `/v1` as well as `/mcp`. The endpoint calls this service's own public API with the caller's key, so limits, the egress guard and per-owner scoping apply as for any caller. A sandbox made through MCP is a plain sandbox: it appears on the admin page, but Agentry Web lists *environments* (records in the Agentry API), so it does not show there unless the API adopts it. Interactive terminals are not offered over MCP.
+
 ## What it does not do
 
 - No SSH or inbound ports into a sandbox, and no snapshots.

@@ -290,6 +290,38 @@ paths:
       responses:
         "200": { description: Deleted. }
         "409": { $ref: "#/components/responses/Error" }
+  /v1/admin/keys:
+    get:
+      summary: Admin. List owner-bound access keys
+      description: "Never returns a key or its hash."
+      security: [{ bearer: [] }]
+      responses:
+        "200": { description: The keys., content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+    post:
+      summary: Admin. Create an owner-bound access key
+      description: "The key (`ask_...`) is in this response only; it is stored as a hash. It acts as `owner`, on `/v1` and on `/mcp`, whatever X-Agentry-Owner says."
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, owner]
+              properties:
+                name: { type: string }
+                owner: { type: string }
+      responses:
+        "201": { description: The key record with `key`., content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        "400": { $ref: "#/components/responses/Error" }
+  /v1/admin/keys/{id}:
+    delete:
+      summary: Admin. Revoke an access key
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: Revoked. }
+        "404": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     bearer: { type: http, scheme: bearer }

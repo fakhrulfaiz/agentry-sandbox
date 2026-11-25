@@ -15,6 +15,8 @@ import { LOCAL_PLACE_ID, type PlaceRegistry, type ProbeResult } from '../places/
 import type { SandboxConfig } from '../config.ts'
 import { GpuUnavailableError, LimitError, NotFoundError, PlaceDisabledError, PlaceUnavailableError, QuotaExceededError, type SandboxService } from '../sandboxes.ts'
 import type { GpuInfo, PlaceRecord, SandboxRecord, Store, TemplateRecord, TemplateSpec } from '../store/types.ts'
+import { handleMcp } from '../mcp/handler.ts'
+import { createOwnerKeys, keyToWire } from './owner-keys.ts'
 import { relay } from './relay.ts'
 
 class PlaceInUseError extends Error {
@@ -200,6 +202,9 @@ export const ROUTES: Route[] = [
   { method: 'POST', openapi: '/v1/admin/places/test' },
   { method: 'PUT', openapi: '/v1/admin/places/{id}' },
   { method: 'DELETE', openapi: '/v1/admin/places/{id}' },
+  { method: 'GET', openapi: '/v1/admin/keys' },
+  { method: 'POST', openapi: '/v1/admin/keys' },
+  { method: 'DELETE', openapi: '/v1/admin/keys/{id}' },
 ]
 
 const MAX_BODY = 1024 * 1024
@@ -234,6 +239,8 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
   const keyHashes = config.apiKeyHashes.map((k) => Buffer.from(k.slice('sha256:'.length), 'hex'))
   const adminHashes = config.adminKeyHashes.map((k) => Buffer.from(k.slice('sha256:'.length), 'hex'))
   const adminPage = loadAdminPage()
+  const ownerKeys = createOwnerKeys(store)
+  const bearerOf = (req: http.IncomingMessage): string | undefined => /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1]
 
   /** The admin surface takes only admin keys; an API key is refused there (and an admin key is refused on /v1). */
   function adminAuthorized(req: http.IncomingMessage): boolean {
@@ -438,6 +445,21 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
       if (action === 'start' && method === 'POST') return { status: 200, body: { ...sandboxToWire(await service.start(owner, id), config.defaultImage), owner } }
       if (action === 'stop' && method === 'POST') return { status: 200, body: { ...sandboxToWire(await service.stop(owner, id), config.defaultImage), owner } }
     }
+    if (a === 'keys') {
+      if (!id && method === 'GET') return { status: 200, body: list((await ownerKeys.list()).map(keyToWire)) }
+      if (!id && method === 'POST') {
+        const b = await body()
+        const keyName = name(b)
+        if (typeof b.owner !== 'string' || !b.owner.trim() || b.owner.length > 200) throw invalid('owner is required (1-200 characters)')
+        const { record, key } = await ownerKeys.create(keyName, b.owner.trim())
+        // The only time the key is shown.
+        return { status: 201, body: { ...keyToWire(record), key } }
+      }
+      if (id && method === 'DELETE') {
+        if (!(await ownerKeys.revoke(id))) throw new NotFoundError('key')
+        return { status: 200, body: { id, object: 'owner_key.deleted', deleted: true } }
+      }
+    }
     if (a === 'places') return dispatchPlaces(method, id, body)
     if (a === 'limits' && !id) {
       const view = () => ({ limits: service.limits(), defaults: config.limits, overrides: service.limitOverrides() })
@@ -576,11 +598,30 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
           const result = await dispatchAdmin(method, url.pathname, () => (adminBody ??= readJson(req)), url.searchParams)
           return send(res, result.status, result.body)
         }
-        if (!authorized(req)) return fail(res, 401, 'unauthorized', 'a valid API key is required')
-        const owner = req.headers['x-agentry-owner']
-        if (typeof owner !== 'string' || !owner.trim()) return fail(res, 400, 'owner_required', 'X-Agentry-Owner is required')
+        const token = bearerOf(req)
+        if (url.pathname === '/mcp') {
+          // The MCP endpoint takes owner-bound keys only: the key fixes whose sandboxes the tools touch.
+          if (token === undefined || (await ownerKeys.ownerOf(token)) === undefined) {
+            res.setHeader('www-authenticate', 'Bearer')
+            return fail(res, 401, 'unauthorized', 'a valid access key is required (create one on the admin page)')
+          }
+          let mcpBody: Promise<Record<string, unknown>> | undefined
+          return await handleMcp(req, res, token, () => (mcpBody ??= readJson(req)))
+        }
+        let owner: string
+        if (authorized(req)) {
+          // A service API key (the Agentry API) names the owner it acts for.
+          const named = req.headers['x-agentry-owner']
+          if (typeof named !== 'string' || !named.trim()) return fail(res, 400, 'owner_required', 'X-Agentry-Owner is required')
+          owner = named.trim()
+        } else {
+          // An owner-bound key is its owner; any X-Agentry-Owner header is ignored.
+          const bound = token === undefined ? undefined : await ownerKeys.ownerOf(token)
+          if (bound === undefined) return fail(res, 401, 'unauthorized', 'a valid API key is required')
+          owner = bound
+        }
         let parsed: Promise<Record<string, unknown>> | undefined
-        const result = await dispatch(method, url.pathname, { owner: owner.trim(), body: () => (parsed ??= readJson(req)), req, res })
+        const result = await dispatch(method, url.pathname, { owner, body: () => (parsed ??= readJson(req)), req, res })
         if (result !== 'handled') send(res, result.status, result.body)
       } catch (e) {
         if (e instanceof HttpError) return fail(res, e.status, e.code, e.message)

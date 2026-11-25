@@ -4,6 +4,12 @@
 
 
 
+## 2026-11-26 — Access keys and MCP
+
+- Owner-bound access keys: the admin page's Access keys section makes a key (`ask_…`) for one user, shows it once, stores only its hash, and revokes it (`GET/POST /v1/admin/keys`, `DELETE /v1/admin/keys/{id}`). Such a key works on `/v1` as that user (an `X-Agentry-Owner` header is ignored) and on `/mcp`. Service-wide API keys are unchanged.
+- `POST /mcp`: a stateless MCP endpoint (tools `sandbox_list`, `_create`, `_start`, `_stop`, `_delete`, `_exec`, `_read_file`, `_write_file`) that calls this service's own API with the caller's key, so ownership and limits apply. See `docs/overview.md`.
+- `docs/overview.md`: what the service is, envd, the DSH helper, places and drivers.
+
 ## 2026-11-25 — E2B places
 
 - E2B places, after the final review: new capability `keepFilesOnReset` (Docker true; E2B and SSH machine false), and a reset that keeps files on a place without it answers 400 (E2B would have deleted every file); the E2B driver trusts a `running` status for 15 s so relayed requests do not each call E2B; E2B 429, 5xx and no-answer errors answer 503 `place_unavailable` and leave a sandbox's state alone instead of marking it failed; changing an E2B place's `api_url` or `sandbox_host` needs the API key in the same save.
