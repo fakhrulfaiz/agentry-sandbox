@@ -1,11 +1,12 @@
 /** In-memory Store for tests; same contract as the Postgres store. */
-import type { SandboxRecord, Store, TemplateRecord } from './types.ts'
+import type { PlaceRecord, SandboxRecord, Store, TemplateRecord } from './types.ts'
 
 const copy = <T>(v: T): T => structuredClone(v)
 
 export function createMemoryStore(): Store {
   const sandboxes = new Map<string, SandboxRecord>()
   const templates = new Map<string, TemplateRecord>()
+  const places = new Map<string, PlaceRecord>()
   const settings = new Map<string, unknown>()
   const owned = <T extends { owner: string }>(m: Map<string, T>, id: string, owner: string) => {
     const r = m.get(id)
@@ -61,6 +62,30 @@ export function createMemoryStore(): Store {
       },
       async delete(id, owner) {
         return owned(templates, id, owner) ? templates.delete(id) : false
+      },
+    },
+    places: {
+      async list() {
+        return [...places.values()].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)).map(copy)
+      },
+      async get(id) {
+        const r = places.get(id)
+        return r && copy(r)
+      },
+      async insert(r) {
+        if (places.has(r.id)) throw new Error(`duplicate place ${r.id}`)
+        if (r.isDefault) for (const p of places.values()) p.isDefault = false
+        places.set(r.id, copy(r))
+      },
+      async update(id, patch) {
+        const r = places.get(id)
+        if (!r) return undefined
+        if (patch.isDefault) for (const p of places.values()) p.isDefault = false
+        Object.assign(r, copy(Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined))))
+        return copy(r)
+      },
+      async delete(id) {
+        return places.delete(id)
       },
     },
     settings: {

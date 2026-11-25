@@ -260,6 +260,7 @@ export function createSandboxService(deps: { store: Store; backend: Backend; con
         templateId,
         state: 'provisioning',
         handle: {},
+        handleSecrets: null,
         error: null,
         createdAt: now(),
         startedAt: null,

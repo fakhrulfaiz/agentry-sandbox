@@ -1,6 +1,6 @@
 /** Postgres Store: the `sandboxes` and `templates` tables from `migrations/`. */
 import type pg from 'pg'
-import type { SandboxPatch, SandboxRecord, Store, TemplatePatch, TemplateRecord } from './types.ts'
+import type { PlacePatch, PlaceRecord, SandboxPatch, SandboxRecord, Store, TemplatePatch, TemplateRecord } from './types.ts'
 
 interface SandboxRow {
   id: string
@@ -11,10 +11,24 @@ interface SandboxRow {
   template_id: string | null
   state: SandboxRecord['state']
   handle: Record<string, string>
+  handle_secrets: string | null
   error: string | null
   created_at: Date
   started_at: Date | null
   last_used_at: Date | null
+}
+interface PlaceRow {
+  id: string
+  name: string
+  kind: string
+  config: Record<string, unknown>
+  secrets: string | null
+  enabled: boolean
+  is_default: boolean
+  max_running: number | null
+  gpus: PlaceRecord['gpus']
+  created_at: Date
+  updated_at: Date
 }
 interface TemplateRow {
   id: string
@@ -37,12 +51,27 @@ const sandboxOf = (r: SandboxRow): SandboxRecord => ({
   templateId: r.template_id,
   state: r.state,
   handle: r.handle,
+  handleSecrets: r.handle_secrets,
   error: r.error,
   createdAt: r.created_at.getTime(),
   startedAt: ms(r.started_at),
   lastUsedAt: ms(r.last_used_at),
 })
 const templateOf = (r: TemplateRow): TemplateRecord => ({ id: r.id, owner: r.owner, name: r.name, spec: r.spec, createdAt: r.created_at.getTime(), updatedAt: r.updated_at.getTime() })
+
+const placeOf = (r: PlaceRow): PlaceRecord => ({
+  id: r.id,
+  name: r.name,
+  kind: r.kind,
+  config: r.config,
+  secrets: r.secrets,
+  enabled: r.enabled,
+  isDefault: r.is_default,
+  maxRunning: r.max_running,
+  gpus: r.gpus,
+  createdAt: r.created_at.getTime(),
+  updatedAt: r.updated_at.getTime(),
+})
 
 type Column = [string, (v: unknown) => unknown]
 
@@ -52,9 +81,21 @@ const SANDBOX_COLUMNS: Record<keyof SandboxPatch, Column> = {
   template: ['template', (v) => JSON.stringify(v)],
   state: ['state', (v) => v],
   handle: ['handle', (v) => JSON.stringify(v)],
+  handleSecrets: ['handle_secrets', (v) => v],
   error: ['error', (v) => v],
   startedAt: ['started_at', (v) => ts((v as number | null) ?? null)],
   lastUsedAt: ['last_used_at', (v) => ts((v as number | null) ?? null)],
+}
+const PLACE_COLUMNS: Record<keyof PlacePatch, Column> = {
+  name: ['name', (v) => v],
+  kind: ['kind', (v) => v],
+  config: ['config', (v) => JSON.stringify(v)],
+  secrets: ['secrets', (v) => v],
+  enabled: ['enabled', (v) => v],
+  isDefault: ['is_default', (v) => v],
+  maxRunning: ['max_running', (v) => v],
+  gpus: ['gpus', (v) => (v === null ? null : JSON.stringify(v))],
+  updatedAt: ['updated_at', (v) => ts((v as number | null) ?? null)],
 }
 const TEMPLATE_COLUMNS: Record<keyof TemplatePatch, Column> = {
   name: ['name', (v) => v],
@@ -84,13 +125,27 @@ export function createPostgresStore(pool: pg.Pool, opts: { ownsPool: boolean } =
     const row = one((await pool.query<TemplateRow>('select * from templates where id = $1 and owner = $2', [id, owner])).rows)
     return row && templateOf(row)
   }
+  async function inTransaction<T>(fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
+    const c = await pool.connect()
+    try {
+      await c.query('begin')
+      const out = await fn(c)
+      await c.query('commit')
+      return out
+    } catch (error) {
+      await c.query('rollback').catch(() => {})
+      throw error
+    } finally {
+      c.release()
+    }
+  }
   return {
     sandboxes: {
       async insert(r) {
         await pool.query(
-          `insert into sandboxes (id, owner, name, backend, template, template_id, state, handle, error, created_at, started_at, last_used_at)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-          [r.id, r.owner, r.name, r.backend, JSON.stringify(r.template), r.templateId, r.state, JSON.stringify(r.handle), r.error, ts(r.createdAt), ts(r.startedAt), ts(r.lastUsedAt)],
+          `insert into sandboxes (id, owner, name, backend, template, template_id, state, handle, handle_secrets, error, created_at, started_at, last_used_at)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          [r.id, r.owner, r.name, r.backend, JSON.stringify(r.template), r.templateId, r.state, JSON.stringify(r.handle), r.handleSecrets, r.error, ts(r.createdAt), ts(r.startedAt), ts(r.lastUsedAt)],
         )
       },
       get: getSandbox,
@@ -132,6 +187,36 @@ export function createPostgresStore(pool: pg.Pool, opts: { ownsPool: boolean } =
       },
       async delete(id, owner) {
         return ((await pool.query('delete from templates where id = $1 and owner = $2', [id, owner])).rowCount ?? 0) > 0
+      },
+    },
+    places: {
+      async list() {
+        return (await pool.query<PlaceRow>('select * from places order by created_at, id')).rows.map(placeOf)
+      },
+      async get(id) {
+        const row = one((await pool.query<PlaceRow>('select * from places where id = $1', [id])).rows)
+        return row && placeOf(row)
+      },
+      async insert(r) {
+        await inTransaction(async (c) => {
+          if (r.isDefault) await c.query('update places set is_default = false where is_default')
+          await c.query(
+            `insert into places (id, name, kind, config, secrets, enabled, is_default, max_running, gpus, created_at, updated_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+            [r.id, r.name, r.kind, JSON.stringify(r.config), r.secrets, r.enabled, r.isDefault, r.maxRunning, r.gpus === null ? null : JSON.stringify(r.gpus), ts(r.createdAt), ts(r.updatedAt)],
+          )
+        })
+      },
+      async update(id, patch) {
+        const { sql, values } = setClause(patch, PLACE_COLUMNS, 2)
+        return inTransaction(async (c) => {
+          if (patch.isDefault) await c.query('update places set is_default = false where is_default and id <> $1', [id])
+          if (!sql) return one((await c.query<PlaceRow>('select * from places where id = $1', [id])).rows)
+          return one((await c.query<PlaceRow>(`update places set ${sql} where id = $1 returning *`, [id, ...values])).rows)
+        }).then((row) => row && placeOf(row))
+      },
+      async delete(id) {
+        return ((await pool.query('delete from places where id = $1', [id])).rowCount ?? 0) > 0
       },
     },
     settings: {
