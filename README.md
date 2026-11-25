@@ -2,6 +2,8 @@
 
 Hardened Docker sandboxes on demand for Agentry agents. Each sandbox is one container running E2B's open-source `envd` (processes, terminals, files), reached only through this service's authenticated relay. The Agentry API uses it as its `sandbox` environment provider; browsers never talk to it.
 
+**New here?** Read [`docs/overview.md`](docs/overview.md): what the service is, how envd and the DeepSeek Harness helper fit in, places and drivers, and how the Agentry API uses it.
+
 ## Setup (development)
 
 1. Node 24 + pnpm 11 (`export PATH=$HOME/.nvm/versions/node/v24.19.0/bin:$PATH`), Docker running.
