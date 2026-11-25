@@ -418,6 +418,7 @@ components:
           properties:
             persistent: { type: boolean }
             reset: { type: boolean }
+            keepFilesOnReset: { type: boolean }
             isolated: { type: boolean }
             network: { type: boolean }
             resources: { type: boolean }

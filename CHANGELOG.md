@@ -6,6 +6,7 @@
 
 ## 2026-11-25 — E2B places
 
+- E2B places, after the final review: new capability `keepFilesOnReset` (Docker true; E2B and SSH machine false), and a reset that keeps files on a place without it answers 400 (E2B would have deleted every file); the E2B driver trusts a `running` status for 15 s so relayed requests do not each call E2B; E2B 429, 5xx and no-answer errors answer 503 `place_unavailable` and leave a sandbox's state alone instead of marking it failed; changing an E2B place's `api_url` or `sandbox_host` needs the API key in the same save.
 - A new place kind, `e2b` ("E2B (hosted)"): sandboxes run on E2B's hosted sandboxes through its REST API, with envd reached at E2B's shared sandbox host (sandbox id, port and the sandbox's access token sent as headers). Creates use auto-pause, so E2B's timeout pauses a sandbox instead of killing it and the next request resumes it; the service extends the timeout of sandboxes in use. The admin page offers it (API key, template, timeout; nothing to confirm). README "E2B places" has what it needs and its limits.
 - A driver can keep a per-sandbox credential in its handle under a `secret.` key; the service stores it sealed in the sandbox's `handleSecrets`, apart from the handle, and hands it back on every driver call. A place kind can explain a refused template field (E2B: "E2B uses templates; set the place's template").
 - Tests: the https relay test makes its throwaway certificate with `openssl` at run time (skipped when `openssl` is missing), so no private key is committed.

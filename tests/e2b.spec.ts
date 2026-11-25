@@ -4,7 +4,7 @@ import { sealSecrets } from '../src/crypto/secrets.ts'
 import { createE2bDriver, e2bFactory } from '../src/places/drivers/e2b.ts'
 import { createFakeDriver } from '../src/places/drivers/fake.ts'
 import { createPlaceRegistry } from '../src/places/registry.ts'
-import { createSandboxService, LimitError } from '../src/sandboxes.ts'
+import { createSandboxService, LimitError, PlaceUnavailableError } from '../src/sandboxes.ts'
 import { createMemoryStore } from '../src/store/memory.ts'
 import { startTestService, type TestService } from '../src/testing.ts'
 import { startFakeE2b } from './support/fake-e2b.ts'
@@ -16,13 +16,13 @@ afterEach(async () => {
   for (const c of cleanups.splice(0).reverse()) await c()
 })
 
-async function setup(cfg: Record<string, unknown> = {}) {
+async function setup(cfg: Record<string, unknown> = {}, ttl = 0, probeTtlMs = 0) {
   const e2b = await startFakeE2b()
   cleanups.push(() => e2b.close())
   const store = createMemoryStore()
   const t = Date.now()
   await store.places.insert({ id: 'place_e2b', name: 'E2B', kind: 'e2b', config: { template: 'tpl-1', api_url: e2b.url, sandbox_host: e2b.url, timeout_s: 600, ...cfg }, secrets: sealSecrets(config.secret, { api_key: e2b.apiKey }), enabled: true, isDefault: false, maxRunning: null, gpus: null, createdAt: t, updatedAt: t })
-  const places = await createPlaceRegistry({ store, config, local: createFakeDriver(), drivers: { e2b: e2bFactory({ retryDelayMs: 0 }) } })
+  const places = await createPlaceRegistry({ store, config, local: createFakeDriver(), probeTtlMs, drivers: { e2b: e2bFactory({ retryDelayMs: 0, statusTtlMs: ttl }) } })
   // The shared bootstrap is not under test here; E2B's envd is the fake's health route.
   const service = createSandboxService({ store, places, config, provision: async (_d, _i, h) => h })
   return { e2b, store, places, service }
@@ -81,7 +81,7 @@ describe('e2b driver', () => {
   it('rate limit surfaces Retry-After', async () => {
     const e2b = await startFakeE2b()
     cleanups.push(() => e2b.close())
-    const driver = createE2bDriver({ apiKey: e2b.apiKey, template: 't', apiUrl: e2b.url, sandboxHost: e2b.url, timeoutS: 600 }, { retryDelayMs: 0 })
+    const driver = createE2bDriver({ apiKey: e2b.apiKey, template: 't', apiUrl: e2b.url, sandboxHost: e2b.url, timeoutS: 600 }, { retryDelayMs: 0, statusTtlMs: 0 })
     const h = await driver.create('sbx_1', 'o', {}, { gpuIds: [] })
     e2b.failNext(429, { 'retry-after': '7' })
     await expect(driver.stop(h)).rejects.toThrow('E2B rate limit; retry after 7 s')
@@ -152,5 +152,55 @@ describe('e2b driver', () => {
     expect(text).not.toContain(e2b.apiKey)
     expect(JSON.parse(text)).toMatchObject({ kind: 'e2b', has_secrets: true, available: true })
   })
-})
 
+  it('reset keeping files is refused on E2B; resetting without keeping them works', async () => {
+    const { e2b, service } = await setup()
+    const s = await service.create('alice', { name: 'box', place: 'place_e2b' })
+    const [first] = [...e2b.sandboxes.keys()]
+    await expect(service.reset('alice', s.id, { keepWorkspace: true })).rejects.toThrow('this place cannot keep files on reset; reset without keeping files')
+    await expect(service.reset('alice', s.id, { keepWorkspace: true })).rejects.toBeInstanceOf(LimitError)
+    expect(e2b.sandboxes.has(first!)).toBe(true)
+    expect((await service.reset('alice', s.id, { keepWorkspace: false })).state).toBe('running')
+    expect(e2b.sandboxes.has(first!)).toBe(false)
+  })
+
+  it('relayed requests do not each ask E2B for the sandbox status', async () => {
+    const { e2b, service } = await setup({}, 15_000)
+    const s = await service.create('alice', { name: 'box', place: 'place_e2b' })
+    const [e2bId] = [...e2b.sandboxes.keys()]
+    e2b.log.length = 0
+    for (let i = 0; i < 10; i++) await service.endpoint('alice', s.id)
+    expect(e2b.log.filter((l) => l === `GET /sandboxes/${e2bId!}`).length).toBeLessThanOrEqual(1)
+  })
+
+  it('a 429 on resume leaves the sandbox stopped and answers place unavailable', async () => {
+    // The place's probe is cached, so the injected failure lands on the connect call.
+    const { e2b, service } = await setup({}, 0, 60_000)
+    const s = await service.create('alice', { name: 'box', place: 'place_e2b' })
+    await service.stop('alice', s.id)
+    e2b.failNext(429, { 'retry-after': '7' })
+    const failing = service.start('alice', s.id)
+    await expect(failing).rejects.toBeInstanceOf(PlaceUnavailableError)
+    expect(e2b.log.some((l) => l.endsWith('/connect'))).toBe(true)
+    const rec = await service.get('alice', s.id)
+    expect(rec.state).toBe('stopped')
+    expect(rec.error).toBeNull()
+    expect((await service.start('alice', s.id)).state).toBe('running')
+  })
+
+  it('changing the E2B address needs the API key typed again', async () => {
+    const e2b = await startFakeE2b()
+    cleanups.push(() => e2b.close())
+    const adminKey = randomBytes(16).toString('hex')
+    const svc: TestService = await startTestService({ AGENTRY_SANDBOX_ADMIN_KEYS: `sha256:${createHash('sha256').update(adminKey).digest('hex')}` }, undefined, { e2b: e2bFactory() })
+    cleanups.push(() => svc.close())
+    const call = (path: string, method: string, body: unknown) => fetch(`${svc.url}${path}`, { method, headers: { authorization: `Bearer ${adminKey}`, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const created = (await (await call('/v1/admin/places', 'POST', { name: 'E2B', kind: 'e2b', config: { template: 'base', api_url: e2b.url, sandbox_host: e2b.url }, secrets: { api_key: e2b.apiKey } })).json()) as { id: string }
+    const moved = await call(`/v1/admin/places/${created.id}`, 'PUT', { config: { template: 'base', api_url: 'https://collector.example', sandbox_host: e2b.url } })
+    expect(moved.status).toBe(400)
+    expect(await moved.text()).toContain('re-enter the API key when changing the address')
+    // Unchanged address without the key is fine; a changed one with the key is fine.
+    expect((await call(`/v1/admin/places/${created.id}`, 'PUT', { config: { template: 'other', api_url: e2b.url, sandbox_host: e2b.url } })).status).toBe(200)
+    expect((await call(`/v1/admin/places/${created.id}`, 'PUT', { config: { template: 'other', api_url: e2b.url + '/', sandbox_host: e2b.url }, secrets: { api_key: e2b.apiKey } })).status).toBe(200)
+  })
+})

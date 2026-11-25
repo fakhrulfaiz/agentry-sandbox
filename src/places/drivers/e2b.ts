@@ -15,7 +15,7 @@
  * Config `{ template, api_url, sandbox_host, timeout_s }`, secrets `{ api_key }`.
  */
 import type { TemplateSpec } from '../../store/types.ts'
-import type { Driver, Handle } from '../driver.ts'
+import { TransientPlaceError, type Driver, type Handle } from '../driver.ts'
 import type { DriverFactory } from '../registry.ts'
 
 export interface E2bPlace {
@@ -32,6 +32,8 @@ export interface E2bDeps {
   retryDelayMs?: number
   /** How long a new or resumed sandbox may take to answer on its envd (default 30000). */
   readyTimeoutMs?: number
+  /** How long a `running` answer of `status` is trusted (default 15000; 0 asks E2B every time). */
+  statusTtlMs?: number
 }
 
 const TOKEN = 'secret.envdAccessToken'
@@ -46,6 +48,9 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
   const host = place.sandboxHost.replace(/\/+$/u, '')
   const retryDelay = deps.retryDelayMs ?? 2_000
   const readyTimeout = deps.readyTimeoutMs ?? 30_000
+  const statusTtl = deps.statusTtlMs ?? 15_000
+  /** Sandboxes last seen running, by E2B id, until when. */
+  const runningUntil = new Map<string, number>()
 
   /** Text that is safe to show: neither the API key nor a token. */
   const scrub = (text: string, extra: string[] = []): string => {
@@ -63,7 +68,7 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       })
     } catch (e) {
-      throw new Error(scrub(`E2B could not be reached: ${e instanceof Error ? e.message : String(e)}`))
+      throw new TransientPlaceError(scrub(`E2B could not be reached: ${e instanceof Error ? e.message : String(e)}`))
     }
     return res
   }
@@ -71,7 +76,7 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
   async function fail(res: Response, what: string): Promise<never> {
     if (res.status === 429) {
       const after = res.headers.get('retry-after')
-      throw new Error(`E2B rate limit; retry after ${after ?? 'a few'} s`)
+      throw new TransientPlaceError(`E2B rate limit; retry after ${after ?? 'a few'} s`)
     }
     if (res.status === 401 || res.status === 403) throw new Error('E2B refused the API key')
     let detail = ''
@@ -81,7 +86,7 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
     } catch {
       // No readable body.
     }
-    if (res.status === 503) throw new Error(`E2B is unavailable right now (HTTP 503) while ${what}; try again shortly`)
+    if (res.status >= 500) throw new TransientPlaceError(`E2B is unavailable right now (HTTP ${String(res.status)}) while ${what}; try again shortly`)
     throw new Error(`E2B ${what} failed (HTTP ${String(res.status)})${detail}`)
   }
 
@@ -111,6 +116,7 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
   }
 
   async function kill(e2bId: string): Promise<void> {
+    runningUntil.delete(e2bId)
     const res = await request('DELETE', `/sandboxes/${e2bId}`)
     if (res.ok || res.status === 404) return
     await fail(res, 'deleting the sandbox')
@@ -130,11 +136,20 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
     return out
   }
 
+  async function readStatus(e2bId: string): Promise<'running' | 'stopped' | 'missing'> {
+    const res = await request('GET', `/sandboxes/${e2bId}`)
+    if (res.status === 404) return 'missing'
+    if (!res.ok) await fail(res, 'reading the sandbox')
+    const body = (await res.json()) as { state?: unknown }
+    return body.state === 'running' ? 'running' : 'stopped'
+  }
+
   const driver: Driver = {
     kind: 'e2b',
     capabilities: {
       persistent: true,
       reset: true,
+      keepFilesOnReset: false,
       isolated: true,
       network: true,
       resources: false,
@@ -193,6 +208,7 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
 
     async stop(handle) {
       const e2bId = idOf(handle)
+      runningUntil.delete(e2bId)
       for (let attempt = 0; ; attempt++) {
         const res = await request('POST', `/sandboxes/${e2bId}/pause`)
         // 409: already paused or pausing. 404: gone, nothing left to pause.
@@ -213,11 +229,13 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
 
     async status(handle) {
       if (!handle.e2bId) return 'missing'
-      const res = await request('GET', `/sandboxes/${idOf(handle)}`)
-      if (res.status === 404) return 'missing'
-      if (!res.ok) await fail(res, 'reading the sandbox')
-      const body = (await res.json()) as { state?: unknown }
-      return body.state === 'running' ? 'running' : 'stopped'
+      const e2bId = idOf(handle)
+      // Every relayed request asks for the status: trust a recent `running` instead of calling E2B each time.
+      if ((runningUntil.get(e2bId) ?? 0) > Date.now()) return 'running'
+      const s = await readStatus(e2bId)
+      if (s === 'running' && statusTtl > 0) runningUntil.set(e2bId, Date.now() + statusTtl)
+      else runningUntil.delete(e2bId)
+      return s
     },
 
     async envdEndpoint(handle) {
@@ -237,7 +255,8 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
     },
 
     async maintain(_id, handle) {
-      if ((await driver.status(handle)) !== 'running') return
+      // The sweep asks E2B itself: a sandbox E2B paused on its own must not be kept alive from the cache.
+      if (!handle.e2bId || (await readStatus(idOf(handle))) !== 'running') return
       const res = await request('POST', `/sandboxes/${idOf(handle)}/timeout`, { timeout: place.timeoutS })
       if (!res.ok && res.status !== 404) await fail(res, 'extending the sandbox timeout')
     },

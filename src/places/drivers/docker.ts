@@ -198,7 +198,7 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
 
   return {
     kind: options.kind ?? 'docker',
-    capabilities: { persistent: true, reset: true, isolated: true, network: true, resources: true, gpu: true, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] },
+    capabilities: { persistent: true, reset: true, keepFilesOnReset: true, isolated: true, network: true, resources: true, gpu: true, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] },
 
     async probe() {
       try {

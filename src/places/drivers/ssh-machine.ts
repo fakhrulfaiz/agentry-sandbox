@@ -373,7 +373,7 @@ export function createSshMachineDriver(
 
   const driver: Driver = {
     kind: 'ssh-machine',
-    capabilities: { persistent: true, reset: false, isolated: false, network: false, resources: false, gpu: true, envdBuiltIn: false, runsAsRoot: true, templateFields: ['setupCommands', 'env', 'files', 'gpus'] },
+    capabilities: { persistent: true, reset: false, keepFilesOnReset: false, isolated: false, network: false, resources: false, gpu: true, envdBuiltIn: false, runsAsRoot: true, templateFields: ['setupCommands', 'env', 'files', 'gpus'] },
     agentUser: login,
     envdUser: (requested) => (requested === 'agent' ? login : requested),
     envdEnv: (handle): Record<string, string> => (handle.gpuIds ? { CUDA_VISIBLE_DEVICES: handle.gpuIds } : {}),

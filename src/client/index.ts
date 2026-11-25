@@ -42,6 +42,7 @@ export interface WireSandbox {
 export interface WireCapabilities {
   persistent: boolean
   reset: boolean
+  keepFilesOnReset: boolean
   isolated: boolean
   network: boolean
   resources: boolean

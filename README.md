@@ -66,6 +66,9 @@ A place of kind "E2B (hosted)" runs sandboxes on [E2B](https://e2b.dev)'s hosted
 
 - **Pause, not kill:** sandboxes are created with auto-pause. When E2B's timeout (`timeout_s`, default 3600) runs out the sandbox is paused with its files and memory kept, and the next request resumes it. While a sandbox is in use the service keeps pushing the timeout out. Stop pauses, start resumes, delete kills.
 - **Reach:** envd is reached through E2B's shared sandbox host (`https://sandbox.e2b.app`) with the sandbox id and E2B's per-sandbox access token as headers. The token is kept sealed apart from the sandbox record and is never returned to a client.
+- **Reset deletes all files:** E2B cannot keep a workspace across a reset (the sandbox is killed and a new one made), so a reset that asks to keep files answers 400 `invalid_request`; reset with `keep_workspace: false`. The place's `capabilities.keepFilesOnReset` is `false`.
+- **Status is cached 15 s:** a relayed request does not ask E2B for the sandbox's state each time, so a sandbox E2B paused on its own is noticed up to 15 s late (the next call then resumes it). A 429, outage or timeout from E2B while starting answers 503 `place_unavailable` and leaves the sandbox as it was (not failed).
+- **Changing the address:** an admin save that changes `api_url` or `sandbox_host` must send the API key again.
 - **Limits are E2B's:** for example 10 running sandboxes on the Hobby plan; set the place's "most sandboxes running at once" to mirror them. A 429 from E2B surfaces as an error with its `Retry-After`; nothing retries in a loop.
 - **Not available:** GPUs and CPU/memory settings (they come from the E2B template), and no host key to confirm. The shared setup copies DSH's runtime through envd, so the template must be Debian-like with glibc on amd64 (E2B's default is).
 - `config`: `template`, optional `timeout_s`, `api_url`, `sandbox_host`; secret `api_key`.

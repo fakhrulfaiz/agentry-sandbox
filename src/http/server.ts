@@ -379,6 +379,8 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
         if (cfg.host_key === undefined && rec.config.host_key !== undefined) cfg.host_key = rec.config.host_key
         if ((rec.kind === 'docker-ssh' || rec.kind === 'ssh-machine') && !cfg.host_key) throw invalid('host_key is required: test the connection and confirm the host key first')
         const secrets = b.secrets !== undefined ? secretsField(b.secrets) : undefined
+        // The E2B key is a bearer secret: a new address must come with the key typed again, or the stored key would be sent there.
+        if (rec.kind === 'e2b' && !secrets?.api_key && (['api_url', 'sandbox_host'] as const).some((k) => String(cfg[k] ?? '') !== String(rec.config[k] ?? ''))) throw invalid('re-enter the API key when changing the address')
         const effective = secrets ?? (rec.secrets ? openSecrets(config.secret, rec.secrets) : {})
         const candidate = buildDriver(rec.kind, cfg, effective)
         try {

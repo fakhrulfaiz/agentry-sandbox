@@ -14,6 +14,8 @@ export type Handle = Record<string, string>
 export interface Capabilities {
   persistent: boolean
   reset: boolean
+  /** Reset can keep the workspace files (Docker keeps its volume; E2B kills the sandbox, so false). */
+  keepFilesOnReset: boolean
   isolated: boolean
   network: boolean
   resources: boolean
@@ -80,6 +82,14 @@ export interface Driver {
   /** SSH-style drivers: the host key fingerprint (`SHA256:...`) seen when connecting without a pinned key (admin "test connection"). */
   observedHostKey?(): string | undefined
   close?(): Promise<void>
+}
+
+/** A place answered with a condition that passes (rate limit, outage, no answer): the sandbox itself is fine (HTTP 503 `place_unavailable`). */
+export class TransientPlaceError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'TransientPlaceError'
+  }
 }
 
 /** A driver reached a host whose key differs from the pinned one (HTTP 409 `place_host_key_changed`). */

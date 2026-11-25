@@ -17,7 +17,7 @@ import { openSecrets, sealSecrets } from './crypto/secrets.ts'
 import { envdToken } from './envd/token.ts'
 import { bootstrap } from './places/bootstrap.ts'
 import { assignGpus } from './places/gpus.ts'
-import { HostKeyChangedError, type Driver, type Handle } from './places/driver.ts'
+import { HostKeyChangedError, TransientPlaceError, type Driver, type Handle } from './places/driver.ts'
 import type { Place, PlaceRegistry } from './places/registry.ts'
 import type { GpuInfo, SandboxRecord, Store, TemplateSpec } from './store/types.ts'
 
@@ -121,6 +121,7 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 const CONNECTION = /ECONNREFUSED|ENOENT|EPIPE|ECONNRESET|EHOSTUNREACH|ETIMEDOUT|socket hang up|timeout|connect EACCES/i
 function unavailable(place: string, e: unknown): PlaceUnavailableError | undefined {
   if (e instanceof PlaceUnavailableError) return e
+  if (e instanceof TransientPlaceError) return new PlaceUnavailableError(place, message(e))
   const code = (e as { code?: unknown }).code
   const text = `${typeof code === 'string' ? code : ''} ${message(e)}`
   return CONNECTION.test(text) ? new PlaceUnavailableError(place, `not reachable: ${message(e)}`) : undefined
@@ -478,6 +479,7 @@ export function createSandboxService(deps: {
         const r = await load(owner, id)
         checkResources(r.template)
         const place = placeOf(r)
+        if (keepWorkspace && !place.driver.capabilities.keepFilesOnReset) throw new LimitError('this place cannot keep files on reset; reset without keeping files')
         await mustAvailable(place)
         await checkRunning(owner, place, id)
         checkRate(owner)
