@@ -202,6 +202,9 @@ patched envd for machines without sudo is on the operator's personal backlog.*
   workspace (the API's path, `sudo -n mkdir -p` + `chown` to the login user), pick a free loopback
   port, and start envd detached with `sudo -n` on `127.0.0.1:<port>`, recording
   `~/.agentry/sandboxes/<id>/{meta.json,envd.pid,envd.log}`; reach it through an SSH tunnel.
+  envd has no listen-address flag, so before starting it the driver adds sudo `iptables`/`ip6tables`
+  rules dropping that port on every interface but loopback (fail closed: no rule, no envd); the
+  tunnel arrives on loopback.
   DSH's runtime for that architecture is copied by the shared bootstrap as everywhere else.
 - `stop` kills that envd; `destroy` stops it and removes exactly the recorded workspace directory
   and `~/.agentry/sandboxes/<id>/` (never anything else); `status` is "running" when the pid is alive
