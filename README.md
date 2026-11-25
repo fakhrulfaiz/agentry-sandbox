@@ -48,6 +48,15 @@ Hardened Docker sandboxes on demand for Agentry agents. Each sandbox is one cont
 - **envd:** its port is published on `127.0.0.1` only (or reached on the container IP); every call needs the per-sandbox token `HMAC-SHA256(secret, sandboxId)`, which only this service knows and never stores.
 - **API:** bearer keys (stored as SHA-256 hashes), `X-Agentry-Owner` on every call, owner-scoped records; another owner's id is a 404.
 
+## SSH machine places
+
+A place of kind "Machine over SSH" (added on the admin page like a Docker-over-SSH place: address, private key, test, confirm the host key) runs sandboxes directly on a Linux machine, with no container. There is no isolation between sandboxes and the agent has the SSH user's sudo, so use it only for a machine you are happy to give agents.
+
+- **Requirements:** Linux x86_64 or aarch64 with glibc, an SSH user with passwordless sudo, and `iptables` (and `ip6tables` when the machine has IPv6).
+- **What Agentry writes:** `~/.agentry/bin` (the envd binary), `~/.agentry/sandboxes/<id>/` (its metadata, pid and log), the sandbox's workspace path (default `/workspace`, created and owned by the SSH user), and per-sandbox firewall rules that accept envd's port only on loopback (tagged `agentry-<id>`). Files that agents create elsewhere stay where they are.
+- **Stop** ends envd and removes its firewall rules; files and the workspace stay. **Delete** also removes the sandbox's `~/.agentry/sandboxes/<id>/` directory and its workspace; the binary in `~/.agentry/bin` is kept. Processes an agent started itself are not killed.
+- A place of this kind cannot reset a sandbox. GPUs are shared (`CUDA_VISIBLE_DEVICES` narrows what a sandbox sees).
+
 ## Third-party
 
 `envd` and its API spec (`third_party/envd/`) come from [e2b-dev/runtime](https://github.com/e2b-dev/runtime) under the Apache License 2.0, unmodified; see `third_party/envd/LICENSE` and `NOTICE.md`.

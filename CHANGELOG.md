@@ -4,6 +4,10 @@
 
 
 
+## 2026-11-25 — SSH machine places
+
+- A new place kind, `ssh-machine` ("Machine over SSH"): sandboxes run directly on a Linux machine over SSH (no Docker, no isolation, the SSH user's passwordless sudo) with a loopback-only firewall rule per sandbox; the admin page offers it next to Docker over SSH, with a warning. It cannot reset a sandbox. README "SSH machine places" lists the requirements and what is written on the machine.
+
 ## 2026-11-25 — places
 
 - Places: one service can run sandboxes on several places. A place is a Docker host (local, remote over SSH with a pinned host key) with its connection secrets stored encrypted; each sandbox runs on its place. Docker and bootstrap code is shared through a driver and one bootstrap routine.

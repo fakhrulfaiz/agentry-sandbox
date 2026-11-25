@@ -223,7 +223,7 @@ paths:
               required: [name, kind, config]
               properties:
                 name: { type: string }
-                kind: { const: docker-ssh }
+                kind: { enum: [docker-ssh, ssh-machine] }
                 config: { type: object }
                 secrets: { type: object, additionalProperties: { type: string }, description: Sealed at rest and never returned. }
                 host_key: { type: string, pattern: "^SHA256:" }
@@ -392,11 +392,11 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
-        kind: { enum: [docker, docker-ssh] }
+        kind: { enum: [docker, docker-ssh, ssh-machine] }
         enabled: { type: boolean }
         default: { type: boolean }
         max_running: { type: [integer, "null"] }
-        config: { type: object, description: "Connection settings (for docker-ssh: `url` and the pinned `host_key`)." }
+        config: { type: object, description: "Connection settings (for docker-ssh and ssh-machine: `url` and the pinned `host_key`)." }
         has_secrets: { type: boolean }
         available: { type: boolean }
         reason: { type: string }

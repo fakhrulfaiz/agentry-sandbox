@@ -34,6 +34,13 @@ describe('admin surface', () => {
     expect((await admin(svc, '/v1/admin/overview')).status).toBe(200)
   })
 
+  it('offers the SSH machine place kind with its no-isolation warning', async () => {
+    svc = await startTestService(ADMIN)
+    const html = await (await fetch(`${svc.url}/admin`)).text()
+    expect(html).toContain('value="ssh-machine">Machine over SSH')
+    expect(html).toContain('No isolation between sandboxes. Requires passwordless sudo and iptables.')
+  })
+
   it('lists every owner and starts, stops and deletes any sandbox', async () => {
     svc = await startTestService(ADMIN)
     const a = await (await asOwner(svc, 'alice', '/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'a1' }) })).json() as { id: string }

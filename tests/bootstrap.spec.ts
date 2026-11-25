@@ -104,7 +104,7 @@ describe.skipIf(!dockerAvailable)('bootstrap', () => {
   it('GPU assignment reaches CUDA_VISIBLE_DEVICES', async () => {
     const { driver, opts } = setup('sbx_b')
     driver.agentUser = 'nobody'
-    driver.envdEnv = (handle) => (handle.gpuIds ? { CUDA_VISIBLE_DEVICES: handle.gpuIds } : {})
+    driver.envdEnv = (handle): Record<string, string> => (handle.gpuIds ? { CUDA_VISIBLE_DEVICES: handle.gpuIds } : {})
     await bootstrap(driver, 'sbx_b', { gpuIds: 'GPU-aaa,GPU-bbb' }, { env: { OTHER: '1' } }, opts)
     expect((await run('sbx_b', 'nobody', 'echo $CUDA_VISIBLE_DEVICES $OTHER')).stdout.trim()).toBe('GPU-aaa,GPU-bbb 1')
   }, 120_000)
