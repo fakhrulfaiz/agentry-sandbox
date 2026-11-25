@@ -7,7 +7,8 @@ import Docker from 'dockerode'
 import type { SandboxConfig } from '../../config.ts'
 import { createEnvdClient } from '../../envd/client.ts'
 import { envdArchive, treeArchive } from '../../backends/envd-binary.ts'
-import type { TemplateSpec } from '../../store/types.ts'
+import type { GpuInfo, TemplateSpec } from '../../store/types.ts'
+import { parseNvidiaSmi } from '../gpus.ts'
 import type { Driver, Handle, ImageInfo, NetworkGuard } from '../driver.ts'
 
 const ENVD_PORT = '49983/tcp'
@@ -59,6 +60,33 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     // Pull without any credential helper (public images; a configured registry login would go in authconfig).
     const stream = await puller.pull(image, {})
     await new Promise<void>((resolve, reject) => puller.modem.followProgress(stream, (err) => (err ? reject(err) : resolve())))
+  }
+
+  /** The GPUs of this host (cached once found: they rarely change, and a probe runs a container). */
+  let gpuCache: GpuInfo[] = []
+  async function listGpus(): Promise<GpuInfo[]> {
+    if (gpuCache.length > 0) return gpuCache
+    const info = await client.info()
+    if (!Object.keys((info as { Runtimes?: Record<string, unknown> }).Runtimes ?? {}).includes('nvidia')) return []
+    const image = config.defaultImage
+    await ensureImage(image)
+    const container = await client.createContainer({
+      Image: image,
+      Entrypoint: [],
+      Cmd: ['nvidia-smi', '--query-gpu=index,uuid,name', '--format=csv,noheader'],
+      Labels: { 'agentry.probe': 'true' },
+      HostConfig: { AutoRemove: false, DeviceRequests: [{ Driver: 'nvidia', Count: -1, Capabilities: [['gpu', 'utility']] }] },
+    })
+    try {
+      await container.start()
+      await container.wait()
+      const logs = await container.logs({ stdout: true, stderr: false })
+      // Docker multiplexes stdout in 8-byte framed chunks; strip the frames.
+      gpuCache = parseNvidiaSmi(demux(Buffer.isBuffer(logs) ? logs : Buffer.from(logs as unknown as string)))
+    } finally {
+      await container.remove({ force: true }).catch(() => {})
+    }
+    return gpuCache
   }
 
   async function envdEndpoint(handle: Handle): Promise<{ baseUrl: string; release?: () => void }> {
@@ -131,15 +159,58 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     if (volume) await client.getVolume(volume).remove().catch((e: unknown) => { if (!isNotFound(e)) throw e })
   }
 
+  const labels = (id: string, owner: string) => ({ 'agentry.managed': 'true', 'agentry.sandbox.id': id, 'agentry.sandbox.owner': owner })
+
+  /** Creates and boots the container on `volume`. A failure removes the container (and the volume when `ownsVolume`). */
+  async function makeContainer(id: string, owner: string, spec: TemplateSpec, gpuIds: string[], volume: string, ownsVolume: boolean, provisioned = 'false'): Promise<Handle> {
+    const image = spec.image ?? config.defaultImage
+    await ensureImage(image)
+    const net = await network.networkFor(owner)
+    const cpus = spec.resources?.cpus ?? config.resources.cpus
+    const memory = spec.resources?.memoryMb ? spec.resources.memoryMb * 1024 * 1024 : config.resources.memoryBytes
+    const container = await client.createContainer({
+      name: containerName(id),
+      Image: image,
+      Entrypoint: ['/opt/agentry/envd', '--isnotfc', '--no-cgroups', '--port', '49983'],
+      Cmd: [],
+      User: 'root',
+      WorkingDir: workspaceOf(spec),
+      Labels: labels(id, owner),
+      ExposedPorts: { [ENVD_PORT]: {} },
+      HostConfig: {
+        Init: true,
+        Privileged: false,
+        CapDrop: ['ALL'],
+        CapAdd: CAP_ADD,
+        PidsLimit: config.resources.pids,
+        NanoCpus: Math.round(cpus * 1e9),
+        Memory: memory,
+        Runtime: config.runtime,
+        NetworkMode: net,
+        Mounts: [{ Type: 'volume', Source: volume, Target: workspaceOf(spec) }],
+        ...(gpuIds.length > 0 ? { DeviceRequests: [{ Driver: 'nvidia', DeviceIDs: gpuIds, Capabilities: [['gpu', 'utility', 'compute']] }] } : {}),
+        ...(config.envdReach === 'loopback' ? { PortBindings: { [ENVD_PORT]: [{ HostIp: '127.0.0.1', HostPort: '' }] } } : {}),
+      },
+    })
+    try {
+      await container.putArchive(await envdArchive(client, config.envdImage), { path: '/' })
+      return await boot({ containerId: container.id, volume, network: net, provisioned }, spec)
+    } catch (e) {
+      // Fail closed: nothing half-made stays behind, running or not.
+      await removeAll(container.id, ownsVolume ? volume : undefined).catch(() => {})
+      throw e
+    }
+  }
+
   return {
     kind: options.kind ?? 'docker',
-    capabilities: { persistent: true, reset: true, isolated: true, network: true, resources: true, gpu: false, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] },
+    capabilities: { persistent: true, reset: true, isolated: true, network: true, resources: true, gpu: true, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] },
 
     async probe() {
       try {
         const v = await client.version()
-        // GPU discovery arrives with GPU assignment; none for now.
-        return { ok: true as const, version: v.Version, gpus: [] }
+        const gpus = await listGpus().catch(() => [] as GpuInfo[])
+        return { ok: true as const, version: v.Version, gpus }
       } catch (e) {
         return { ok: false as const, reason: `Docker is not reachable: ${(e as Error).message}` }
       }
@@ -154,50 +225,23 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
       }
     },
 
-    async create(id, owner, spec, _ctx) {
-      const image = spec.image ?? config.defaultImage
-      await ensureImage(image)
-      const net = await network.networkFor(owner)
-      const labels = { 'agentry.managed': 'true', 'agentry.sandbox.id': id, 'agentry.sandbox.owner': owner }
+    async create(id, owner, spec, ctx) {
       const volume = volumeName(id)
-      await client.createVolume({ Name: volume, Labels: labels })
-      const cpus = spec.resources?.cpus ?? config.resources.cpus
-      const memory = spec.resources?.memoryMb ? spec.resources.memoryMb * 1024 * 1024 : config.resources.memoryBytes
-      const container = await client.createContainer({
-        name: containerName(id),
-        Image: image,
-        Entrypoint: ['/opt/agentry/envd', '--isnotfc', '--no-cgroups', '--port', '49983'],
-        Cmd: [],
-        User: 'root',
-        WorkingDir: workspaceOf(spec),
-        Labels: labels,
-        ExposedPorts: { [ENVD_PORT]: {} },
-        HostConfig: {
-          Init: true,
-          Privileged: false,
-          CapDrop: ['ALL'],
-          CapAdd: CAP_ADD,
-          PidsLimit: config.resources.pids,
-          NanoCpus: Math.round(cpus * 1e9),
-          Memory: memory,
-          Runtime: config.runtime,
-          NetworkMode: net,
-          Mounts: [{ Type: 'volume', Source: volume, Target: workspaceOf(spec) }],
-          ...(config.envdReach === 'loopback' ? { PortBindings: { [ENVD_PORT]: [{ HostIp: '127.0.0.1', HostPort: '' }] } } : {}),
-        },
-      })
-      try {
-        await container.putArchive(await envdArchive(client, config.envdImage), { path: '/' })
-        return await boot({ containerId: container.id, volume, network: net, provisioned: 'false' }, spec)
-      } catch (e) {
-        // Fail closed: nothing half-made stays behind, running or not.
-        await removeAll(container.id, volume).catch(() => {})
-        throw e
-      }
+      await client.createVolume({ Name: volume, Labels: labels(id, owner) })
+      return makeContainer(id, owner, spec, ctx.gpuIds, volume, true)
     },
 
-    async start(_id, handle, spec, _ctx) {
+    async start(id, handle, spec, ctx) {
       try {
+        const info = await client.getContainer(handle.containerId!).inspect()
+        const current = (info.HostConfig.DeviceRequests ?? []).flatMap((d) => d.DeviceIDs ?? []).sort()
+        const wanted = [...ctx.gpuIds].sort()
+        if (current.join(',') !== wanted.join(',')) {
+          // Devices are fixed at container create: recreate on the same volume (the workspace survives).
+          const owner = info.Config.Labels['agentry.sandbox.owner'] ?? ''
+          await removeAll(handle.containerId!, undefined)
+          return await makeContainer(id, owner, spec, ctx.gpuIds, handle.volume ?? volumeName(id), false)
+        }
         return await boot(handle, spec)
       } catch (e) {
         await stopContainer(handle.containerId!).catch(() => {})
@@ -255,4 +299,16 @@ export function imageInfoFromLabels(labels: Record<string, string>): ImageInfo |
   }
   const info = { runtimes, python_packages: words(labels['org.agentry.python-packages']), tools: words(labels['org.agentry.tools']) }
   return Object.keys(info.runtimes).length + info.python_packages.length + info.tools.length > 0 ? info : undefined
+}
+
+/** Strips Docker's 8-byte stream frames from container logs (a TTY-less container's output). */
+function demux(buf: Buffer): string {
+  const parts: Buffer[] = []
+  let i = 0
+  while (i + 8 <= buf.length && buf[i]! <= 2 && buf[i + 1] === 0) {
+    const len = buf.readUInt32BE(i + 4)
+    parts.push(buf.subarray(i + 8, i + 8 + len))
+    i += 8 + len
+  }
+  return i === 0 ? buf.toString('utf8') : Buffer.concat(parts).toString('utf8')
 }

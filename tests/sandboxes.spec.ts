@@ -312,3 +312,57 @@ describe('places', () => {
     expect(await service.endpoint('alice', r.id)).toEqual({ baseUrl: 'http://127.0.0.1:9', token: 'driver-token', release })
   })
 })
+
+describe('exclusive GPUs', () => {
+  const gpus = [{ index: 0, uuid: 'GPU-0', name: 'A100' }, { index: 1, uuid: 'GPU-1', name: 'A100' }]
+
+  it('concurrent starts never share a GPU', async () => {
+    const { backend, service } = await setup()
+    backend.setGpus(gpus)
+    const results = await Promise.allSettled([1, 2, 3].map((n) => service.create('alice', { name: `g${String(n)}`, gpus: 1 })))
+    const ok = results.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof service.create>>> => r.status === 'fulfilled')
+    const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+    expect(ok.length).toBe(2)
+    expect(failed.length).toBe(1)
+    expect(failed[0]!.reason).toMatchObject({ name: 'GpuUnavailableError', message: "place 'Local Docker' has 0 of 2 GPUs free" })
+    expect(new Set(ok.map((r) => r.value.handle.gpuIds)).size).toBe(2)
+    expect(ok.map((r) => r.value.handle.gpuIds).sort()).toEqual(['GPU-0', 'GPU-1'])
+    expect([...backend.gpuIds.values()].flat().sort()).toEqual(['GPU-0', 'GPU-1'])
+  })
+
+  it('stopping frees the GPU for the next start', async () => {
+    const { backend, service } = await setup()
+    backend.setGpus([gpus[0]!])
+    const a = await service.create('alice', { name: 'a', gpus: 1 })
+    const b = await service.create('alice', { name: 'b', template: {} })
+    await service.stop('alice', b.id)
+    await expect(service.create('alice', { name: 'c', gpus: 1 })).rejects.toMatchObject({ name: 'GpuUnavailableError' })
+    const stopped = await service.stop('alice', a.id)
+    expect(stopped.handle.gpuIds).toBeUndefined()
+    const c = await service.create('alice', { name: 'c', gpus: 1 })
+    expect(c.handle.gpuIds).toBe('GPU-0')
+    // a start of the stopped one while c holds the only GPU is refused and leaves it stopped.
+    await expect(service.start('alice', a.id)).rejects.toMatchObject({ name: 'GpuUnavailableError' })
+    expect((await service.get('alice', a.id)).state).toBe('stopped')
+    await service.stop('alice', c.id)
+    expect((await service.start('alice', a.id)).handle.gpuIds).toBe('GPU-0')
+    expect(backend.gpuIds.get(a.id)).toEqual(['GPU-0'])
+  })
+
+  it('a failed start releases its GPUs', async () => {
+    const { backend, service } = await setup()
+    backend.setGpus([gpus[0]!])
+    const a = await service.create('alice', { name: 'a', gpus: 1 })
+    await service.stop('alice', a.id)
+    backend.failNextStart('boom')
+    await expect(service.start('alice', a.id)).rejects.toThrow('boom')
+    expect((await service.get('alice', a.id)).handle.gpuIds).toBeUndefined()
+    expect((await service.create('alice', { name: 'b', gpus: 1 })).handle.gpuIds).toBe('GPU-0')
+  })
+
+  it('a create asking for GPUs on a place without GPUs is invalid_request', async () => {
+    const { backend, service } = await setup()
+    backend.setGpus([])
+    await expect(service.create('alice', { name: 'x', gpus: 1 })).rejects.toMatchObject({ name: 'LimitError', message: "place 'Local Docker' has no GPUs" })
+  })
+})

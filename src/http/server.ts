@@ -13,7 +13,7 @@ import { openSecrets, sealSecrets } from '../crypto/secrets.ts'
 import { HostKeyChangedError, type Driver } from '../places/driver.ts'
 import { LOCAL_PLACE_ID, type PlaceRegistry } from '../places/registry.ts'
 import type { SandboxConfig } from '../config.ts'
-import { LimitError, NotFoundError, PlaceDisabledError, PlaceUnavailableError, QuotaExceededError, type SandboxService } from '../sandboxes.ts'
+import { GpuUnavailableError, LimitError, NotFoundError, PlaceDisabledError, PlaceUnavailableError, QuotaExceededError, type SandboxService } from '../sandboxes.ts'
 import type { GpuInfo, PlaceRecord, SandboxRecord, Store, TemplateRecord, TemplateSpec } from '../store/types.ts'
 import { relay } from './relay.ts'
 
@@ -574,6 +574,7 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
         if (e instanceof HostKeyChangedError) return fail(res, 409, 'place_host_key_changed', e.message)
         if (e instanceof PlaceInUseError) return fail(res, 409, 'place_in_use', e.message)
         if (e instanceof PlaceDisabledError) return fail(res, 409, 'place_disabled', e.message)
+        if (e instanceof GpuUnavailableError) return fail(res, 409, 'gpu_unavailable', e.message)
         if (e instanceof QuotaExceededError) return fail(res, 429, 'quota_exceeded', e.message)
         if (e instanceof LimitError) return fail(res, 400, 'invalid_request', e.message)
         const msg = e instanceof Error ? e.message : String(e)

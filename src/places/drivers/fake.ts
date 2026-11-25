@@ -8,6 +8,8 @@ import type { Availability, Driver, Handle } from '../driver.ts'
 
 export interface FakeKnobs {
   calls: string[]
+  /** The GPU uuids last given to each sandbox's create or start. */
+  gpuIds: Map<string, string[]>
   failNextStart(reason: string): void
   setAvailable(ok: boolean, reason?: string): void
   /** Drops a sandbox as if its container vanished. */
@@ -40,12 +42,14 @@ export function createFakeDriver(): FakeDriver {
   let availability: Availability = { ok: true, version: 'fake' }
   let baseUrl = 'http://127.0.0.1:1'
   const calls: string[] = []
+  const gpuIds = new Map<string, string[]>()
   const idOf = (h: Handle) => h.id ?? ''
 
   return {
     kind: 'fake',
     capabilities: { persistent: true, reset: true, isolated: true, network: true, resources: false, gpu: false, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] },
     calls,
+    gpuIds,
     failNextStart(reason) {
       failure = reason
     },
@@ -80,9 +84,10 @@ export function createFakeDriver(): FakeDriver {
     async describeImage() {
       return { runtimes: { python: '3.11', node: '24' }, python_packages: ['pandas'], tools: ['git'] }
     },
-    async create(id: string, owner: string, _spec: TemplateSpec, _ctx) {
+    async create(id: string, owner: string, _spec: TemplateSpec, ctx) {
       down()
       calls.push(`create ${id}`)
+      gpuIds.set(id, ctx.gpuIds)
       if (createDelay > 0) await new Promise((r) => setTimeout(r, createDelay))
       if (createFailure !== undefined) {
         const reason = createFailure
@@ -92,9 +97,10 @@ export function createFakeDriver(): FakeDriver {
       boxes.set(id, { owner, running: true })
       return { id }
     },
-    async start(id, _handle, _spec, _ctx) {
+    async start(id, _handle, _spec, ctx) {
       down()
       calls.push(`start ${id}`)
+      gpuIds.set(id, ctx.gpuIds)
       await new Promise((r) => setTimeout(r, 5))
       if (failure !== undefined) {
         const reason = failure

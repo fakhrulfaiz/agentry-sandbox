@@ -15,9 +15,10 @@ import { randomBytes } from 'node:crypto'
 import type { Limits, SandboxConfig } from './config.ts'
 import { envdToken } from './envd/token.ts'
 import { bootstrap } from './places/bootstrap.ts'
+import { assignGpus } from './places/gpus.ts'
 import type { Driver, Handle } from './places/driver.ts'
 import type { Place, PlaceRegistry } from './places/registry.ts'
-import type { SandboxRecord, Store, TemplateSpec } from './store/types.ts'
+import type { GpuInfo, SandboxRecord, Store, TemplateSpec } from './store/types.ts'
 
 export class NotFoundError extends Error {
   constructor(what: string) {
@@ -61,6 +62,14 @@ export class LimitError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'LimitError'
+  }
+}
+
+/** Not enough free GPUs on a place (HTTP 409 `gpu_unavailable`). */
+export class GpuUnavailableError extends Error {
+  constructor(placeName: string, free: number, total: number) {
+    super(`place '${placeName}' has ${String(free)} of ${String(total)} GPUs free`)
+    this.name = 'GpuUnavailableError'
   }
 }
 
@@ -173,13 +182,46 @@ export function createSandboxService(deps: {
     if (!a.ok) throw new PlaceUnavailableError(place.name, a.reason)
   }
 
-  const gpuCtx = () => ({ gpuIds: [] as string[] })
+  /** The GPUs a place has now: what its driver reports, else what was stored when it was added. */
+  async function gpusOf(place: Place): Promise<GpuInfo[]> {
+    const p = await place.driver.probe().catch(() => undefined)
+    return p?.ok && p.gpus && p.gpus.length > 0 ? p.gpus : place.gpus
+  }
+
+  const heldBy = (r: SandboxRecord): string[] => (r.handle.gpuIds ? r.handle.gpuIds.split(',').filter(Boolean) : [])
+  /** A handle with the GPU assignment released. */
+  const withoutGpus = (h: Handle): Handle => {
+    const { gpuIds: _g, ...rest } = h
+    return rest
+  }
+  /** No machine exists yet (the assignment alone does not make one). */
+  const noMachine = (h: Handle) => Object.keys(withoutGpus(h)).length === 0
+
+  /**
+   * Gives the sandbox its GPUs, exclusively: under the place's GPU lock, the free ones are the place's
+   * minus those held by other sandboxes' handles; the assignment is saved on this sandbox's handle
+   * before the lock is released, so concurrent starts never see the same GPU as free.
+   */
+  function reserveGpus(place: Place, r: SandboxRecord): Promise<{ record: SandboxRecord; gpuIds: string[] }> {
+    const want = r.template.gpus ?? 0
+    if (want === 0) return Promise.resolve({ record: r, gpuIds: [] })
+    return locked(`gpus:${place.id}`, async () => {
+      const gpus = await gpusOf(place)
+      const held = new Set((await store.sandboxes.listAll()).filter((o) => o.id !== r.id && o.backend === place.id).flatMap(heldBy))
+      const free = gpus.filter((g) => !held.has(g.uuid))
+      const chosen = assignGpus(free, want, gpus.length)
+      if (!chosen) throw new GpuUnavailableError(place.name, free.length, gpus.length)
+      const gpuIds = chosen.map((g) => g.uuid)
+      return { record: await save(r, { handle: { ...r.handle, gpuIds: gpuIds.join(',') } }), gpuIds }
+    })
+  }
 
   /** Runs the driver's create then the shared bootstrap; a failed bootstrap leaves nothing behind. */
-  async function makeMachine(place: Place, r: SandboxRecord): Promise<Handle> {
-    const handle = await call(place, () => place.driver.create(r.id, r.owner, r.template, gpuCtx()))
+  async function makeMachine(place: Place, r: SandboxRecord, gpuIds: string[]): Promise<Handle> {
+    const handle = await call(place, () => place.driver.create(r.id, r.owner, r.template, { gpuIds }))
     try {
-      return await call(place, () => provision(place.driver, r.id, handle, r.template))
+      const done = await call(place, () => provision(place.driver, r.id, handle, r.template))
+      return gpuIds.length > 0 ? { ...done, gpuIds: gpuIds.join(',') } : done
     } catch (e) {
       await place.driver.destroy(r.id, handle, { keepWorkspace: false }).catch(() => {})
       throw e
@@ -243,11 +285,14 @@ export function createSandboxService(deps: {
 
   async function build(r: SandboxRecord): Promise<SandboxRecord> {
     try {
-      const handle = await makeMachine(placeOf(r), r)
+      const place = placeOf(r)
+      const reserved = await reserveGpus(place, r)
+      const handle = await makeMachine(place, reserved.record, reserved.gpuIds)
       const t = now()
       return await save(r, { state: 'running', handle, error: null, startedAt: t, lastUsedAt: t })
     } catch (e) {
-      await store.sandboxes.update(r.id, r.owner, { state: 'failed', error: message(e) })
+      // A failed start releases its GPUs.
+      await store.sandboxes.update(r.id, r.owner, { state: 'failed', error: message(e), handle: {} })
       throw e
     }
   }
@@ -259,9 +304,11 @@ export function createSandboxService(deps: {
     if (r.state === 'running' && (await call(place, () => place.driver.status(r.handle))) === 'running') return r
     await mustAvailable(place)
     await checkRunning(owner, place, id)
-    if (Object.keys(r.handle).length === 0) return build(await save(r, { state: 'provisioning', error: null }))
+    if (noMachine(r.handle)) return build(await save(r, { state: 'provisioning', error: null }))
+    let reserved: { record: SandboxRecord; gpuIds: string[] } | undefined
     try {
-      const started = await call(place, () => place.driver.start(r.id, r.handle, r.template, gpuCtx()))
+      reserved = await reserveGpus(place, r)
+      const started = await call(place, () => place.driver.start(r.id, r.handle, r.template, { gpuIds: reserved!.gpuIds }))
       let handle: Handle
       try {
         handle = await call(place, () => provision(place.driver, r.id, started, r.template))
@@ -269,10 +316,14 @@ export function createSandboxService(deps: {
         await place.driver.stop(started).catch(() => {})
         throw e
       }
+      if (reserved.gpuIds.length > 0) handle = { ...handle, gpuIds: reserved.gpuIds.join(',') }
       const t = now()
       return await save(r, { state: 'running', handle, error: null, startedAt: t, lastUsedAt: t })
     } catch (e) {
-      if (!(e instanceof PlaceUnavailableError)) await save(r, { state: 'failed', error: message(e) })
+      if (e instanceof GpuUnavailableError) throw e
+      // A failed start releases its GPUs.
+      if (!(e instanceof PlaceUnavailableError)) await save(r, { state: 'failed', error: message(e), handle: withoutGpus(r.handle) })
+      else if (reserved) await save(r, { handle: withoutGpus(r.handle) }).catch(() => {})
       throw e
     }
   }
@@ -290,7 +341,7 @@ export function createSandboxService(deps: {
           try {
             const place = placeOf(r)
             await call(place, () => place.driver.stop(r.handle))
-            await save(r, { state: 'stopped' })
+            await save(r, { state: 'stopped', handle: withoutGpus(r.handle) })
             stopped.push(r.id)
           } catch {
             // Leave it running; the next sweep tries again.
@@ -326,9 +377,9 @@ export function createSandboxService(deps: {
         if (field === 'gpus') continue
         if (!allowed.includes(field)) throw new LimitError(`place '${place.name}' does not support '${field}'`)
       }
-      if (gpus !== undefined && gpus !== 0 && !place.driver.capabilities.gpu) throw new LimitError(`place '${place.name}' has no GPUs`)
       checkResources(template)
       await mustAvailable(place)
+      if (gpus !== undefined && gpus !== 0 && (await gpusOf(place)).length === 0) throw new LimitError(`place '${place.name}' has no GPUs`)
       await checkCreate(owner, place)
       const record: SandboxRecord = {
         id: `sbx_${randomBytes(16).toString('hex')}`,
@@ -370,11 +421,11 @@ export function createSandboxService(deps: {
     stop(owner, id) {
       return locked(id, async () => {
         const r = await load(owner, id)
-        if (Object.keys(r.handle).length > 0) {
+        if (!noMachine(r.handle)) {
           const place = placeOf(r)
           await call(place, () => place.driver.stop(r.handle))
         }
-        return save(r, { state: 'stopped' })
+        return save(r, { state: 'stopped', handle: withoutGpus(r.handle) })
       })
     },
 
@@ -456,13 +507,15 @@ export function createSandboxService(deps: {
           const m = byId.get(r.id)
           if (!m) {
             if (r.state === 'provisioning' || r.state === 'running' || r.state === 'stopped') {
-              await save(r, { state: 'failed', error: 'sandbox container is missing' })
+              await save(r, { state: 'failed', error: 'sandbox container is missing', handle: withoutGpus(r.handle) })
               missing.push(r.id)
             }
             continue
           }
           const status = await call(place, () => place.driver.status(m.handle))
-          const handle = { ...r.handle, ...m.handle, provisioned: r.handle.provisioned ?? m.handle.provisioned ?? 'true' }
+          const merged = { ...r.handle, ...m.handle, provisioned: r.handle.provisioned ?? m.handle.provisioned ?? 'true' }
+          // A machine that is not running holds no GPUs.
+          const handle = status === 'running' ? merged : withoutGpus(merged)
           await save(r, { handle, state: status === 'running' ? 'running' : r.state === 'deleting' ? 'deleting' : 'stopped' })
           adopted.push(r.id)
         }

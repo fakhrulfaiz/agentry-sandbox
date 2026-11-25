@@ -316,7 +316,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Template" }
     Error:
-      description: "`unauthorized` 401, `owner_required` 400, `invalid_request` 400 (also a template over the per-sandbox CPU or memory maximum), `not_found` 404, `sandbox_failed` 409, `quota_exceeded` 429 (a sandbox, running or creation-rate limit; the message says which), `place_unavailable` 503 (the message names the place), `place_disabled` 409. Admin routes also use `place_in_use` 409 and `place_host_key_changed` 409."
+      description: "`unauthorized` 401, `owner_required` 400, `invalid_request` 400 (also a template over the per-sandbox CPU or memory maximum), `not_found` 404, `sandbox_failed` 409, `quota_exceeded` 429 (a sandbox, running or creation-rate limit; the message says which), `place_unavailable` 503 (the message names the place), `place_disabled` 409, `gpu_unavailable` 409 (the place has too few free GPUs; the message says how many of how many). Admin routes also use `place_in_use` 409 and `place_host_key_changed` 409."
       content:
         application/json:
           schema:
