@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createFakeBackend } from '../src/backends/fake.ts'
+import { createFakeBackend } from '../src/places/legacy.ts'
 import { loadConfig } from '../src/config.ts'
 import { envdToken } from '../src/envd/token.ts'
 import { BackendUnavailableError, createSandboxService, NotFoundError } from '../src/sandboxes.ts'

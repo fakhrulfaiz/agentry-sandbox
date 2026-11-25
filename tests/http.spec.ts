@@ -104,7 +104,7 @@ describe('limits over HTTP', () => {
 
 describe('image info', () => {
   it('reads org.agentry labels, and nothing from an unlabelled image', async () => {
-    const { imageInfoFromLabels } = await import('../src/backends/docker.ts')
+    const { imageInfoFromLabels } = await import('../src/places/drivers/docker.ts')
     expect(imageInfoFromLabels({ 'org.agentry.runtimes': '{"node":"24.21.0","python":"3.11","bad":1}', 'org.agentry.python-packages': 'pandas  numpy', 'org.agentry.tools': 'git' }))
       .toEqual({ runtimes: { node: '24.21.0', python: '3.11' }, python_packages: ['pandas', 'numpy'], tools: ['git'] })
     expect(imageInfoFromLabels({ 'org.agentry.runtimes': 'not json' })).toBeUndefined()

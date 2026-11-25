@@ -1,25 +1,18 @@
 /**
- * The Docker backend: one hardened container per sandbox, running E2B's envd
+ * The Docker driver: one hardened container per sandbox, running E2B's envd
  * (injected, so any image works), with the workspace on a named volume.
- *
- * First start provisions through envd as root: the `agent` user with
- * passwordless sudo, template packages (apt or apk), template files, then the
- * template's setup commands as `agent` in `/workspace`. Later starts only
- * start the container, so whatever the agent installed is still there.
+ * It places envd and gets it reachable; provisioning is the shared bootstrap.
  */
 import Docker from 'dockerode'
-import type { SandboxConfig } from '../config.ts'
-import { createEnvdClient, type EnvdClient } from '../envd/client.ts'
-import { runInEnvd, sq } from '../envd/run.ts'
-import { envdToken } from '../envd/token.ts'
-import type { TemplateSpec } from '../store/types.ts'
-import { envdArchive, treeArchive } from './envd-binary.ts'
-import type { Availability, Backend, BackendHandle, ImageInfo, NetworkGuard } from './types.ts'
+import type { SandboxConfig } from '../../config.ts'
+import { createEnvdClient } from '../../envd/client.ts'
+import { envdArchive, treeArchive } from '../../backends/envd-binary.ts'
+import type { TemplateSpec } from '../../store/types.ts'
+import type { Driver, Handle, ImageInfo, NetworkGuard } from '../driver.ts'
 
 const ENVD_PORT = '49983/tcp'
 const DEFAULT_WORKSPACE = '/workspace'
 const workspaceOf = (spec: TemplateSpec) => spec.workspacePath ?? DEFAULT_WORKSPACE
-const AGENT = 'agent'
 /** Docker's default capability set minus NET_RAW: enough for sudo, package managers and chown. */
 const CAP_ADD = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'KILL', 'SETGID', 'SETUID', 'SETPCAP', 'NET_BIND_SERVICE', 'SYS_CHROOT', 'AUDIT_WRITE', 'MKNOD']
 
@@ -41,37 +34,13 @@ export function dockerClient(config: SandboxConfig, timeout: number | undefined 
 const isNotFound = (e: unknown) => (e as { statusCode?: number }).statusCode === 404
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** The script that makes `agent` (uid 1000) with passwordless sudo, on Debian-like or Alpine images, and owns the workspace. */
-const ensureAgent = (WORKSPACE: string) => `
-set -e
-if command -v apt-get >/dev/null 2>&1; then PM=apt; elif command -v apk >/dev/null 2>&1; then PM=apk; else PM=none; fi
-if ! command -v sudo >/dev/null 2>&1; then
-  if [ "$PM" = apt ]; then apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo >/dev/null
-  elif [ "$PM" = apk ]; then apk add --no-cache -q sudo
-  fi
-fi
-if ! id -u ${AGENT} >/dev/null 2>&1; then
-  if command -v useradd >/dev/null 2>&1; then useradd -m -u 1000 -s /bin/sh ${AGENT} 2>/dev/null || useradd -m -s /bin/sh ${AGENT}
-  else adduser -D -u 1000 -s /bin/sh ${AGENT} 2>/dev/null || adduser -D -s /bin/sh ${AGENT}
-  fi
-fi
-mkdir -p /etc/sudoers.d
-printf '${AGENT} ALL=(ALL) NOPASSWD:ALL\\n' > /etc/sudoers.d/${AGENT}
-chmod 0440 /etc/sudoers.d/${AGENT}
-mkdir -p ${sq(WORKSPACE)}
-chown ${AGENT}: ${sq(WORKSPACE)}
-`
-
-function installScript(packages: string[]): string {
-  const list = packages.map(sq).join(' ')
-  return `set -e
-if command -v apt-get >/dev/null 2>&1; then apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ${list} >/dev/null
-elif command -v apk >/dev/null 2>&1; then apk add --no-cache -q ${list}
-else echo "no supported package manager (apt-get or apk) in this image" >&2; exit 1; fi`
+/** The DSH runtime tree from `config.dshRuntimeImage` as a tar, for the bootstrap to copy through envd (null when disabled). */
+export function dockerDshRuntime(config: SandboxConfig, client: Docker = dockerClient(config)): (() => Promise<Buffer>) | null {
+  const image = config.dshRuntimeImage
+  return image ? () => treeArchive(client, image, '/opt/agentry/dsh') : null
 }
 
-export function createDockerBackend(config: SandboxConfig, network: NetworkGuard, client: Docker = dockerClient(config), puller: Docker = dockerClient(config, undefined)): Backend {
-  const token = (id: string) => envdToken(config.secret, id)
+export function createDockerDriver(config: SandboxConfig, network: NetworkGuard, client: Docker = dockerClient(config), puller: Docker = dockerClient(config, undefined)): Driver {
 
   async function ensureImage(image: string): Promise<void> {
     try {
@@ -85,7 +54,7 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
     await new Promise<void>((resolve, reject) => puller.modem.followProgress(stream, (err) => (err ? reject(err) : resolve())))
   }
 
-  async function endpoint(handle: BackendHandle): Promise<{ baseUrl: string }> {
+  async function envdEndpoint(handle: Handle): Promise<{ baseUrl: string }> {
     const info = await client.getContainer(handle.containerId!).inspect()
     if (config.envdReach === 'loopback') {
       const port = info.NetworkSettings.Ports?.[ENVD_PORT]?.find((b) => b.HostIp === '127.0.0.1')?.HostPort
@@ -97,12 +66,12 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
     return { baseUrl: `http://${ip}:49983` }
   }
 
-  async function waitHealthy(handle: BackendHandle): Promise<void> {
+  async function waitHealthy(handle: Handle): Promise<void> {
     const deadline = Date.now() + config.startTimeoutMs
     let last = 'not started'
     for (;;) {
       try {
-        const { baseUrl } = await endpoint(handle)
+        const { baseUrl } = await envdEndpoint(handle)
         if (await createEnvdClient({ baseUrl, accessToken: '' }).health(AbortSignal.timeout(2_000))) return
         last = 'health check failed'
       } catch (e) {
@@ -113,42 +82,17 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
     }
   }
 
-  async function provision(envd: EnvdClient, spec: TemplateSpec): Promise<void> {
-    const must = async (user: string, script: string, what: string, cwd?: string) => {
-      const r = await runInEnvd(envd, user, script, { ...(cwd ? { cwd } : {}), ...(spec.env ? { env: spec.env } : {}) })
-      if (r.code !== 0) throw new Error(`${what} failed (exit ${String(r.code)}): ${(r.stderr || r.stdout).trim().slice(-500)}`)
-    }
-    const WORKSPACE = workspaceOf(spec)
-    await must('root', ensureAgent(WORKSPACE), 'creating the agent user')
-    if (spec.packages && spec.packages.length > 0) await must('root', installScript(spec.packages), 'installing packages')
-    for (const file of spec.files ?? []) {
-      const path = file.path.startsWith('/') ? file.path : `${WORKSPACE}/${file.path}`
-      await must(AGENT, `mkdir -p "$(dirname ${sq(path)})"`, `preparing ${file.path}`)
-      await envd.writeFile(path, new TextEncoder().encode(file.content), AGENT)
-    }
-    for (const command of spec.setupCommands ?? []) await must(AGENT, command, `setup command "${command}"`, WORKSPACE)
-  }
-
   /**
-   * Starts the container, waits for envd, initialises it, and provisions on
-   * first start. Until `/init` envd accepts any caller, so a boot that fails
-   * must not leave the container running: `safeBoot` stops it (start) and
-   * `create` removes it.
+   * Starts the container, applies its network rules and waits for envd. Until
+   * `/init` envd accepts any caller, so a boot that fails must not leave the
+   * container running: `start` stops it and `create` removes it.
    */
-  async function boot(id: string, handle: BackendHandle, spec: TemplateSpec): Promise<BackendHandle> {
+  async function boot(handle: Handle, spec: TemplateSpec): Promise<Handle> {
     const container = client.getContainer(handle.containerId!)
     if (!(await container.inspect()).State.Running) await container.start()
     await network.applyFor(handle.containerId!, { network: spec.network !== false })
     await waitHealthy(handle)
-    const { baseUrl } = await endpoint(handle)
-    const envd = createEnvdClient({ baseUrl, accessToken: token(id) })
-    const base = { accessToken: token(id), defaultWorkdir: workspaceOf(spec), ...(spec.env ? { envVars: spec.env } : {}) }
-    if (handle.provisioned !== 'true') {
-      await envd.init({ ...base, defaultUser: 'root' })
-      await provision(envd, spec)
-    }
-    await envd.init({ ...base, defaultUser: AGENT })
-    return { ...handle, provisioned: 'true' }
+    return handle
   }
 
   async function stopContainer(containerId: string): Promise<void> {
@@ -178,14 +122,15 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
 
   return {
     kind: 'docker',
-    capabilities: { persistent: true, network: true, resources: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] },
+    capabilities: { persistent: true, reset: true, isolated: true, network: true, resources: true, gpu: false, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] },
 
-    async available(): Promise<Availability> {
+    async probe() {
       try {
         const v = await client.version()
-        return { ok: true, version: v.Version }
+        // GPU discovery arrives with GPU assignment; none for now.
+        return { ok: true as const, version: v.Version, gpus: [] }
       } catch (e) {
-        return { ok: false, reason: `Docker is not reachable: ${(e as Error).message}` }
+        return { ok: false as const, reason: `Docker is not reachable: ${(e as Error).message}` }
       }
     },
 
@@ -198,7 +143,7 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
       }
     },
 
-    async create(id, owner, spec) {
+    async create(id, owner, spec, _ctx) {
       const image = spec.image ?? config.defaultImage
       await ensureImage(image)
       const net = await network.networkFor(owner)
@@ -232,8 +177,7 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
       })
       try {
         await container.putArchive(await envdArchive(client, config.envdImage), { path: '/' })
-        if (config.dshRuntimeImage) await container.putArchive(await treeArchive(client, config.dshRuntimeImage, '/opt/agentry/dsh'), { path: '/opt/agentry' })
-        return await boot(id, { containerId: container.id, volume, network: net, provisioned: 'false' }, spec)
+        return await boot({ containerId: container.id, volume, network: net, provisioned: 'false' }, spec)
       } catch (e) {
         // Fail closed: nothing half-made stays behind, running or not.
         await removeAll(container.id, volume).catch(() => {})
@@ -241,9 +185,9 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
       }
     },
 
-    async start(id, handle, spec) {
+    async start(_id, handle, spec, _ctx) {
       try {
-        return await boot(id, handle, spec)
+        return await boot(handle, spec)
       } catch (e) {
         await stopContainer(handle.containerId!).catch(() => {})
         throw e
@@ -275,7 +219,7 @@ export function createDockerBackend(config: SandboxConfig, network: NetworkGuard
       }
     },
 
-    endpoint,
+    envdEndpoint,
 
     async listManaged() {
       const list = await client.listContainers({ all: true, filters: { label: ['agentry.managed=true'] } })

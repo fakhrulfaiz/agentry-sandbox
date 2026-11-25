@@ -6,8 +6,7 @@
  */
 import { createHash, randomBytes } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
-import { createDockerBackend } from './backends/docker.ts'
-import { createFakeBackend, type FakeBackend } from './backends/fake.ts'
+import { createDockerBackend, createFakeBackend, type FakeBackend } from './places/legacy.ts'
 import { createPassthroughNetworkGuard, type Backend } from './backends/types.ts'
 import { loadConfig, type SandboxConfig } from './config.ts'
 import { createServer } from './http/server.ts'

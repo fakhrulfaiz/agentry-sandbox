@@ -1,7 +1,7 @@
 /** Starts the HTTP API on an ephemeral port over an in-memory store and the fake backend. */
 import { createHash } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
-import { createFakeBackend, type FakeBackend } from '../../src/backends/fake.ts'
+import { createFakeBackend, type FakeBackend } from '../../src/places/legacy.ts'
 import { loadConfig, type SandboxConfig } from '../../src/config.ts'
 import { createServer } from '../../src/http/server.ts'
 import { createSandboxService, type SandboxService } from '../../src/sandboxes.ts'

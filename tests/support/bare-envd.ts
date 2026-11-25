@@ -17,7 +17,7 @@ export async function startBareEnvd(image = 'debian:bookworm-slim'): Promise<Bar
     Cmd: [],
     Labels: { 'agentry.test': 'bare-envd' },
     ExposedPorts: { '49983/tcp': {} },
-    HostConfig: { Init: true, PortBindings: { '49983/tcp': [{ HostIp: '127.0.0.1', HostPort: '' }] } },
+    HostConfig: { Init: true, Tmpfs: { '/workspace': '' }, PortBindings: { '49983/tcp': [{ HostIp: '127.0.0.1', HostPort: '' }] } },
   })
   await container.putArchive(await envdArchive(d, 'agentry/envd:envd-v0.6.13'), { path: '/' })
   await container.start()

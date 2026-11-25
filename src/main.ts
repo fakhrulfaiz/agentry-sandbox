@@ -6,7 +6,7 @@
  */
 import Docker from 'dockerode'
 import pg from 'pg'
-import { createDockerBackend } from './backends/docker.ts'
+import { createDockerBackend } from './places/legacy.ts'
 import { createNetworkGuard } from './backends/network-guard.ts'
 import { ConfigError, loadConfig } from './config.ts'
 import { createServer } from './http/server.ts'
