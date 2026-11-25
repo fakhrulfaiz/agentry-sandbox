@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import { createFakeDriver, type FakeDriver } from '../../src/places/drivers/fake.ts'
-import { createPlaceRegistry } from '../../src/places/registry.ts'
+import { createPlaceRegistry, type DriverFactory, type PlaceRegistry } from '../../src/places/registry.ts'
 import { loadConfig, type SandboxConfig } from '../../src/config.ts'
 import { createServer } from '../../src/http/server.ts'
 import { createSandboxService, type SandboxService } from '../../src/sandboxes.ts'
@@ -20,16 +20,17 @@ export interface TestServer {
   url: string
   backend: FakeDriver
   service: SandboxService
+  places: PlaceRegistry
   store: Store
   close(): Promise<void>
   /** fetch with the key and an owner (default alice). */
   call(path: string, init?: RequestInit & { owner?: string | null; key?: string | null }): Promise<Response>
 }
 
-export async function startServer(): Promise<TestServer> {
+export async function startServer(drivers: Record<string, DriverFactory> = {}): Promise<TestServer> {
   const store = createMemoryStore()
   const backend = createFakeDriver()
-  const places = await createPlaceRegistry({ store, config, local: backend, drivers: {} })
+  const places = await createPlaceRegistry({ store, config, local: backend, drivers })
   const service = createSandboxService({ store, places, config, provision: async (_d, _i, h) => h })
   const server = createServer({ config, service, store, places })
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
@@ -38,6 +39,7 @@ export async function startServer(): Promise<TestServer> {
     url,
     backend,
     service,
+    places,
     store,
     close: () => new Promise<void>((r) => { server.closeAllConnections(); server.close(() => r()) }),
     call(path, init = {}) {

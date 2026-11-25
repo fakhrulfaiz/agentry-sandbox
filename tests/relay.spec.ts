@@ -32,6 +32,17 @@ afterEach(async () => {
 const create = async () => ((await (await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'box' }) })).json()) as { id: string }).id
 
 describe('envd relay', () => {
+  it('the relay releases the tunnel after the response ends', async () => {
+    const id = await create()
+    let released = 0
+    const base = s.backend.envdEndpoint.bind(s.backend)
+    s.backend.envdEndpoint = async (h) => ({ ...(await base(h)), release: () => { released++ } })
+    const r = await s.call(`/v1/sandboxes/${id}/envd/health`)
+    expect(await r.text()).toBe('ok')
+    await new Promise((res) => setTimeout(res, 50))
+    expect(released).toBe(1)
+  })
+
   it('injects the sandbox token and strips caller credentials', async () => {
     const id = await create()
     const r = await s.call(`/v1/sandboxes/${id}/envd/process.Process/List?x=1`, { method: 'POST', body: '{}', headers: { 'X-Access-Token': 'forged', 'X-Envd-User': 'agent', 'connect-protocol-version': '1' } })

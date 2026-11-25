@@ -55,7 +55,17 @@ export interface Driver {
   maintain?(id: string, handle: Handle, spec: TemplateSpec): Promise<void>
   /** Frees what an owner held once their last sandbox is gone (Docker: their network). */
   releaseOwner?(owner: string): Promise<void>
+  /** SSH-style drivers: the host key fingerprint (`SHA256:...`) seen when connecting without a pinned key (admin "test connection"). */
+  observedHostKey?(): string | undefined
   close?(): Promise<void>
+}
+
+/** A driver reached a host whose key differs from the pinned one (HTTP 409 `place_host_key_changed`). */
+export class HostKeyChangedError extends Error {
+  constructor(message = 'the host key changed') {
+    super(message)
+    this.name = 'HostKeyChangedError'
+  }
 }
 
 /** Network placement and egress rules for sandboxes (Docker). */

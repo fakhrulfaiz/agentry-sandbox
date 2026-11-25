@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net'
 import { createPassthroughNetworkGuard, type Driver } from './places/driver.ts'
 import { createDockerDriver, dockerClient, dockerDshRuntime } from './places/drivers/docker.ts'
 import { createFakeDriver, type FakeDriver } from './places/drivers/fake.ts'
-import { createPlaceRegistry, type PlaceRegistry } from './places/registry.ts'
+import { createPlaceRegistry, type DriverFactory, type PlaceRegistry } from './places/registry.ts'
 import { loadConfig, type SandboxConfig } from './config.ts'
 import { createServer } from './http/server.ts'
 import { createSandboxService, type SandboxService } from './sandboxes.ts'
@@ -52,7 +52,7 @@ export async function startDockerTestService(env: Record<string, string> = {}): 
   }
 }
 
-export async function startTestService(env: Record<string, string> = {}, real?: { makeDriver: (config: SandboxConfig) => Driver; dshRuntime: (config: SandboxConfig) => (() => Promise<Buffer>) | null }): Promise<TestService & { ownersSeen: Set<string> }> {
+export async function startTestService(env: Record<string, string> = {}, real?: { makeDriver: (config: SandboxConfig) => Driver; dshRuntime: (config: SandboxConfig) => (() => Promise<Buffer>) | null }, drivers: Record<string, DriverFactory> = {}): Promise<TestService & { ownersSeen: Set<string> }> {
   const key = randomBytes(16).toString('hex')
   const config = loadConfig({
     AGENTRY_SANDBOX_DATABASE_URL: 'postgres://unused@localhost/unused',
@@ -67,7 +67,7 @@ export async function startTestService(env: Record<string, string> = {}, real?: 
   })
   const store = createMemoryStore()
   const backend = (real ? real.makeDriver(config) : createFakeDriver()) as FakeDriver
-  const places = await createPlaceRegistry({ store, config, local: backend, drivers: {} })
+  const places = await createPlaceRegistry({ store, config, local: backend, drivers })
   // The fake has no envd behind it, so nothing is provisioned there.
   const service = createSandboxService({ store, places, config, ...(real ? { dshRuntime: real.dshRuntime(config) } : { provision: async (_d: Driver, _i: string, h: Record<string, string>) => h }) })
   const ownersSeen = new Set<string>()

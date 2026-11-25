@@ -9,11 +9,19 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import http from 'node:http'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import type { PlaceRegistry } from '../places/registry.ts'
+import { openSecrets, sealSecrets } from '../crypto/secrets.ts'
+import { HostKeyChangedError, type Driver } from '../places/driver.ts'
+import { LOCAL_PLACE_ID, type PlaceRegistry } from '../places/registry.ts'
 import type { SandboxConfig } from '../config.ts'
 import { LimitError, NotFoundError, PlaceDisabledError, PlaceUnavailableError, QuotaExceededError, type SandboxService } from '../sandboxes.ts'
-import type { SandboxRecord, Store, TemplateRecord, TemplateSpec } from '../store/types.ts'
+import type { GpuInfo, PlaceRecord, SandboxRecord, Store, TemplateRecord, TemplateSpec } from '../store/types.ts'
 import { relay } from './relay.ts'
+
+class PlaceInUseError extends Error {
+  constructor(placeName: string, count: number) {
+    super(`Place '${placeName}' still has ${String(count)} sandbox${count === 1 ? '' : 'es'}; delete them first`)
+  }
+}
 
 class HttpError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
@@ -34,12 +42,23 @@ function templateToWire(t: TemplateSpec): Record<string, unknown> {
   if (t.env !== undefined) out.env = t.env
   if (t.network !== undefined) out.network = t.network
   if (t.files !== undefined) out.files = t.files
+  if (t.place !== undefined) out.place = t.place
+  if (t.gpus !== undefined) out.gpus = t.gpus
   if (t.resources !== undefined) out.resources = { ...(t.resources.cpus !== undefined ? { cpus: t.resources.cpus } : {}), ...(t.resources.memoryMb !== undefined ? { memory_mb: t.resources.memoryMb } : {}) }
   return out
 }
 
 const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string')
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+function placeIdFromWire(v: unknown, field: string): string {
+  if (typeof v !== 'string' || !v.trim() || v.length > 100) throw invalid(`${field} must be a place id`)
+  return v
+}
+function gpusFromWire(v: unknown, field: string): number | 'all' {
+  if (v === 'all' || (typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 64)) return v
+  throw invalid(`${field} must be a whole number of GPUs or "all"`)
+}
 
 /** Validates a wire template; throws 400 on anything malformed. */
 export function templateFromWire(v: unknown): TemplateSpec {
@@ -77,6 +96,8 @@ export function templateFromWire(v: unknown): TemplateSpec {
     if (files.some((f) => !f.path || f.path.includes('\0'))) throw invalid('template.files paths must be non-empty')
     t.files = files.map((f) => ({ path: f.path, content: f.content }))
   }
+  if (w.place !== undefined) t.place = placeIdFromWire(w.place, 'template.place')
+  if (w.gpus !== undefined) t.gpus = gpusFromWire(w.gpus, 'template.gpus')
   if (w.resources !== undefined) {
     const r = w.resources as Record<string, unknown> | null
     if (!r || typeof r !== 'object') throw invalid('template.resources must be an object')
@@ -111,6 +132,8 @@ const sandboxToWire = (r: SandboxRecord, defaultImage: string) => ({
   object: 'sandbox',
   name: r.name,
   backend: r.backend,
+  place: r.backend,
+  gpus: r.template.gpus ?? 0,
   state: r.state,
   template_id: r.templateId,
   image: r.template.image ?? defaultImage,
@@ -123,6 +146,9 @@ const sandboxToWire = (r: SandboxRecord, defaultImage: string) => ({
 })
 
 const templateRecordToWire = (t: TemplateRecord) => ({ id: t.id, object: 'template', name: t.name, spec: templateToWire(t.spec), created_at: sec(t.createdAt), updated_at: sec(t.updatedAt) })
+
+const gpusWire = (gpus: GpuInfo[] | undefined) => ({ count: gpus?.length ?? 0, models: [...new Set((gpus ?? []).map((g) => g.name))] })
+const HOST_KEY = /^SHA256:[A-Za-z0-9+/]{20,}={0,2}$/
 
 const list = <T>(data: T[]) => ({ object: 'list', data })
 
@@ -169,6 +195,11 @@ export const ROUTES: Route[] = [
   { method: 'GET', openapi: '/v1/templates/{id}' },
   { method: 'PUT', openapi: '/v1/templates/{id}' },
   { method: 'DELETE', openapi: '/v1/templates/{id}' },
+  { method: 'GET', openapi: '/v1/admin/places' },
+  { method: 'POST', openapi: '/v1/admin/places' },
+  { method: 'POST', openapi: '/v1/admin/places/test' },
+  { method: 'PUT', openapi: '/v1/admin/places/{id}' },
+  { method: 'DELETE', openapi: '/v1/admin/places/{id}' },
 ]
 
 const MAX_BODY = 1024 * 1024
@@ -193,7 +224,7 @@ async function readJson(req: http.IncomingMessage): Promise<Record<string, unkno
 
 export function createServer(deps: { config: SandboxConfig; service: SandboxService; store: Store; places: PlaceRegistry }): http.Server {
   const { config, service, store, places } = deps
-  /** The default place's driver, as the single "backend" the current routes describe (Task 4 lists every place). */
+  /** The default place's driver, as the "backend" the admin overview describes. */
   const backendOf = async () => {
     const { driver } = places.default()
     const { gpus: _g, ...av } = await driver.probe()
@@ -209,6 +240,158 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
     if (!m) return false
     const digest = createHash('sha256').update(m[1]!).digest()
     return adminHashes.some((h) => h.length === digest.length && timingSafeEqual(h, digest))
+  }
+
+  const probeOf = async (driver: Driver) => {
+    try {
+      return await driver.probe()
+    } catch (e) {
+      return { ok: false as const, reason: e instanceof Error ? e.message : String(e), gpus: undefined }
+    }
+  }
+
+  /** Builds a driver from request fields; a bad kind or config answers 400. */
+  function buildDriver(kind: string, cfg: Record<string, unknown>, secrets: Record<string, string>): Driver {
+    const record: PlaceRecord = { id: 'candidate', name: 'candidate', kind, config: cfg, secrets: null, enabled: true, isDefault: false, maxRunning: null, gpus: null, createdAt: 0, updatedAt: 0 }
+    try {
+      return places.makeDriver(record, secrets)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      throw invalid(/unknown place kind/.test(msg) ? 'unknown place kind' : msg)
+    }
+  }
+  const objectField = (v: unknown, field: string): Record<string, unknown> => {
+    if (v === undefined) return {}
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) throw invalid(`${field} must be an object`)
+    return v as Record<string, unknown>
+  }
+  const secretsField = (v: unknown): Record<string, string> => {
+    const o = objectField(v, 'secrets')
+    if (Object.values(o).some((x) => typeof x !== 'string')) throw invalid('secrets must map names to strings')
+    return o as Record<string, string>
+  }
+  const hostKeyField = (v: unknown): string => {
+    if (typeof v !== 'string' || !HOST_KEY.test(v)) throw invalid('host_key must look like SHA256:<base64>')
+    return v
+  }
+  const maxRunningField = (v: unknown): number | null => {
+    if (v === null) return null
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) throw invalid('max_running must be a whole number or null')
+    return v
+  }
+
+  async function adminPlaces() {
+    const records = new Map((await store.places.list()).map((r) => [r.id, r]))
+    const all = await service.listEverything()
+    const live = places.list()
+    const view = async (p: { id: string; name: string; kind: string; enabled: boolean; isDefault: boolean; maxRunning: number | null; driver?: Driver; gpus: GpuInfo[] }) => {
+      const rec = records.get(p.id)
+      const probed = p.driver ? await probeOf(p.driver) : { ok: false as const, reason: 'This place could not be set up (unknown kind or unreadable credentials).', gpus: undefined }
+      return {
+        id: p.id, name: p.name, kind: p.kind, enabled: p.enabled, default: p.isDefault, max_running: p.maxRunning,
+        config: p.id === LOCAL_PLACE_ID ? {} : rec?.config ?? {}, has_secrets: rec?.secrets != null,
+        available: probed.ok, ...(probed.ok ? {} : { reason: probed.reason }),
+        gpus: gpusWire(probed.ok && probed.gpus ? probed.gpus : p.gpus), sandboxes: all.filter((r) => r.backend === p.id).length,
+      }
+    }
+    const out = await Promise.all(live.map((p) => view(p)))
+    const missing = [...records.values()].filter((r) => !live.some((p) => p.id === r.id))
+    for (const r of missing) out.push(await view({ id: r.id, name: r.name, kind: r.kind, enabled: r.enabled, isDefault: false, maxRunning: r.maxRunning, gpus: r.gpus ?? [] }))
+    return out
+  }
+
+  async function dispatchPlaces(method: string, id: string | undefined, body: () => Promise<Record<string, unknown>>): Promise<{ status: number; body?: unknown }> {
+    if (!id && method === 'GET') return { status: 200, body: { data: await adminPlaces() } }
+    const viewOne = async (pid: string) => (await adminPlaces()).find((p) => p.id === pid)
+    if (id === 'test' && method === 'POST') {
+      const b = await body()
+      if (typeof b.kind !== 'string') throw invalid('kind is required')
+      const cfg = { ...objectField(b.config, 'config') }
+      delete cfg.host_key // connect without trusting a key; the fingerprint seen is returned
+      const driver = buildDriver(b.kind, cfg, secretsField(b.secrets))
+      try {
+        const probed = await probeOf(driver)
+        const hostKey = driver.observedHostKey?.()
+        return { status: 200, body: { ok: probed.ok, ...(probed.ok ? {} : { reason: probed.reason }), ...(hostKey ? { host_key: hostKey } : {}), ...(probed.ok && probed.gpus && probed.gpus.length > 0 ? { gpus: gpusWire(probed.gpus) } : {}) } }
+      } finally {
+        await driver.close?.().catch(() => {})
+      }
+    }
+    if (!id && method === 'POST') {
+      const b = await body()
+      const pname = name(b)
+      if (typeof b.kind !== 'string' || !b.kind) throw invalid('kind is required')
+      if (b.kind === 'docker') throw invalid('the local Docker place is built in')
+      const cfg = { ...objectField(b.config, 'config') }
+      if (b.host_key !== undefined) cfg.host_key = hostKeyField(b.host_key)
+      const secrets = secretsField(b.secrets)
+      const driver = buildDriver(b.kind, cfg, secrets)
+      let gpus: GpuInfo[] | null = null
+      try {
+        const probed = await probeOf(driver)
+        if (probed.ok && probed.gpus && probed.gpus.length > 0) gpus = probed.gpus
+      } finally {
+        await driver.close?.().catch(() => {})
+      }
+      const t = Date.now()
+      const rec: PlaceRecord = {
+        id: `place_${randomBytes(8).toString('hex')}`, name: pname, kind: b.kind, config: cfg,
+        secrets: Object.keys(secrets).length > 0 ? sealSecrets(config.secret, secrets) : null,
+        enabled: b.enabled === undefined ? true : b.enabled === true, isDefault: false,
+        maxRunning: b.max_running === undefined ? null : maxRunningField(b.max_running), gpus, createdAt: t, updatedAt: t,
+      }
+      await store.places.insert(rec)
+      await places.reload()
+      return { status: 201, body: await viewOne(rec.id) }
+    }
+    if (id && id !== 'test' && method === 'PUT') {
+      const b = await body()
+      let rec = await store.places.get(id)
+      if (!rec && id === LOCAL_PLACE_ID) {
+        const t = Date.now()
+        rec = { id, name: places.get(id)?.name ?? 'Local Docker', kind: 'docker', config: {}, secrets: null, enabled: true, isDefault: false, maxRunning: null, gpus: null, createdAt: t, updatedAt: t }
+        await store.places.insert(rec)
+      }
+      if (!rec) throw new NotFoundError(`place ${id} not found`)
+      const isLocal = id === LOCAL_PLACE_ID
+      const patch: Record<string, unknown> = { updatedAt: Date.now() }
+      if (b.name !== undefined) patch.name = name(b)
+      if (b.max_running !== undefined) patch.maxRunning = maxRunningField(b.max_running)
+      if (b.enabled !== undefined) {
+        if (typeof b.enabled !== 'boolean') throw invalid('enabled must be true or false')
+        if (!b.enabled && places.get(id)?.isDefault) throw invalid('make another place the default before disabling this one')
+        patch.enabled = b.enabled
+      }
+      if (b.default !== undefined) {
+        if (b.default !== true) throw invalid('default can only be set to true (make another place the default instead)')
+        if (!(b.enabled ?? rec.enabled)) throw new PlaceDisabledError(rec.name)
+        patch.isDefault = true
+      }
+      if (b.config !== undefined || b.secrets !== undefined || b.host_key !== undefined) {
+        if (isLocal) throw invalid('the local Docker place has no connection settings')
+        const cfg = b.config !== undefined ? { ...objectField(b.config, 'config') } : { ...rec.config }
+        if (b.host_key !== undefined) cfg.host_key = hostKeyField(b.host_key)
+        const secrets = b.secrets !== undefined ? secretsField(b.secrets) : undefined
+        const effective = secrets ?? (rec.secrets ? openSecrets(config.secret, rec.secrets) : {})
+        await buildDriver(rec.kind, cfg, effective).close?.().catch(() => {})
+        patch.config = cfg
+        if (secrets) patch.secrets = Object.keys(secrets).length > 0 ? sealSecrets(config.secret, secrets) : null
+      }
+      await store.places.update(id, patch)
+      await places.reload()
+      return { status: 200, body: await viewOne(id) }
+    }
+    if (id && id !== 'test' && method === 'DELETE') {
+      if (id === LOCAL_PLACE_ID) throw invalid('the local Docker place cannot be deleted')
+      const rec = await store.places.get(id)
+      if (!rec) throw new NotFoundError(`place ${id} not found`)
+      const n = (await service.listEverything()).filter((r) => r.backend === id).length
+      if (n > 0) throw new PlaceInUseError(rec.name, n)
+      await store.places.delete(id)
+      await places.reload()
+      return { status: 200, body: { id, object: 'place.deleted', deleted: true } }
+    }
+    throw new HttpError(404, 'not_found', 'route not found')
   }
 
   /** `/v1/admin/...`: every owner's sandboxes, the service overview and the live limits. */
@@ -240,6 +423,7 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
       if (action === 'start' && method === 'POST') return { status: 200, body: { ...sandboxToWire(await service.start(owner, id), config.defaultImage), owner } }
       if (action === 'stop' && method === 'POST') return { status: 200, body: { ...sandboxToWire(await service.stop(owner, id), config.defaultImage), owner } }
     }
+    if (a === 'places') return dispatchPlaces(method, id, body)
     if (a === 'limits' && !id) {
       const view = () => ({ limits: service.limits(), defaults: config.limits, overrides: service.limitOverrides() })
       if (method === 'GET') return { status: 200, body: view() }
@@ -273,13 +457,17 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
     if (seg[0] !== 'v1') throw new HttpError(404, 'not_found', 'route not found')
     const [, a, id, action, ...rest] = seg
     if (a === 'backends' && !id && method === 'GET') {
-      const backend = await backendOf()
-      const av = backend.available
-      const info = av.ok && backend.describeImage ? await backend.describeImage(config.defaultImage) : undefined
-      return { status: 200, body: list([{
-        kind: backend.kind, available: av.ok, ...(av.ok ? { version: av.version } : { reason: av.reason }), capabilities: backend.capabilities,
-        default_image: { name: config.defaultImage, ...(info ? info : {}) },
-      }]) }
+      const out = await Promise.all(places.list().filter((p) => p.enabled).map(async (p) => {
+        const probed = await probeOf(p.driver)
+        const info = probed.ok && p.driver.describeImage ? await p.driver.describeImage(config.defaultImage).catch(() => undefined) : undefined
+        const gpus = probed.ok && probed.gpus ? probed.gpus : p.gpus
+        return {
+          id: p.id, name: p.name, default: p.isDefault, kind: p.kind, available: probed.ok, ...(probed.ok ? { version: probed.version } : { reason: probed.reason }),
+          ...(gpus.length > 0 ? { gpus: gpusWire(gpus) } : {}), capabilities: p.driver.capabilities,
+          default_image: { name: config.defaultImage, ...(info ?? {}) },
+        }
+      }))
+      return { status: 200, body: list(out) }
     }
     if (a === 'sandboxes') {
       if (!id) {
@@ -290,7 +478,8 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
           if (templateId !== undefined && typeof templateId !== 'string') throw invalid('template_id must be a string')
           const workspacePath = workspacePathFromWire(body.workspace_path)
           const template = { ...templateFromWire(body.template), ...(workspacePath ? { workspacePath } : {}) }
-          const r = await service.create(ctx.owner, { name: name(body), ...(templateId ? { templateId } : {}), template })
+          const place = body.place === undefined ? undefined : placeIdFromWire(body.place, 'place')
+          const r = await service.create(ctx.owner, { name: name(body), ...(templateId ? { templateId } : {}), ...(place ? { place } : {}), template })
           return { status: 201, body: sandboxToWire(r, config.defaultImage) }
         }
       } else if (!action) {
@@ -381,7 +570,9 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
       } catch (e) {
         if (e instanceof HttpError) return fail(res, e.status, e.code, e.message)
         if (e instanceof NotFoundError) return fail(res, 404, 'not_found', e.message)
-        if (e instanceof PlaceUnavailableError) return fail(res, 503, 'backend_unavailable', e.reason)
+        if (e instanceof PlaceUnavailableError) return fail(res, 503, 'place_unavailable', e.message)
+        if (e instanceof HostKeyChangedError) return fail(res, 409, 'place_host_key_changed', e.message)
+        if (e instanceof PlaceInUseError) return fail(res, 409, 'place_in_use', e.message)
         if (e instanceof PlaceDisabledError) return fail(res, 409, 'place_disabled', e.message)
         if (e instanceof QuotaExceededError) return fail(res, 429, 'quota_exceeded', e.message)
         if (e instanceof LimitError) return fail(res, 400, 'invalid_request', e.message)
