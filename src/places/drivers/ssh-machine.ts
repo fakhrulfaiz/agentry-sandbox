@@ -4,7 +4,10 @@
  * `~/.agentry/bin` and started (one per sandbox) with passwordless sudo on a
  * free port, reached through an SSH tunnel. envd has no listen-address flag,
  * so before it starts the driver adds iptables/ip6tables rules dropping that
- * port on every interface but loopback; no rule, no envd (fail closed).
+ * port on every interface but loopback and rejecting loopback connections
+ * from any user but the login user; no rules, no envd (fail closed). envd runs
+ * in its own session (setsid) whose id is its pid, so stop ends the whole
+ * session, agent processes included.
  *
  * Config `{ url: 'ssh://user@host[:port]', host_key }`, secrets
  * `{ private_key }`, like `docker-ssh`. Without `host_key` the driver answers
@@ -13,7 +16,9 @@
  *
  * Remote layout: `~/.agentry/bin/envd-<version>-<arch>`, and per sandbox
  * `~/.agentry/sandboxes/<id>/{meta.json,envd.pid,envd.log}`. Destroy removes
- * exactly the recorded workspace and that directory, nothing else.
+ * the recorded workspace (only one this driver created: it carries a marker
+ * holding the sandbox id, and is named `sandbox-...`) and that directory,
+ * nothing else.
  */
 import { createHash } from 'node:crypto'
 import { posix } from 'node:path'
@@ -37,6 +42,9 @@ const ID = /^[A-Za-z0-9_-]{1,64}$/u
 const PORT_FROM = 49_300
 const PORT_SPAN = 600
 const DEFAULT_WORKSPACE = '/workspace'
+/** The file in a workspace this driver created; it holds the sandbox id. */
+const MARKER = '.agentry-sandbox'
+const OWNED_NAME = /^sandbox-[A-Za-z0-9_-]+$/u
 /** System directories that are never a workspace to delete. */
 const PROTECTED = new Set(['/', '/bin', '/boot', '/dev', '/etc', '/home', '/lib', '/lib64', '/opt', '/proc', '/root', '/run', '/sbin', '/srv', '/sys', '/tmp', '/usr', '/var'])
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -62,6 +70,7 @@ interface Meta {
 }
 
 interface Dirs {
+  uid: number
   home: string
   bin: string
   sandboxes: string
@@ -132,11 +141,21 @@ export function createSshMachineDriver(
     return r.stdout
   }
 
+  /** Why `sudo -n` does not work for the login user, or undefined when it does. */
+  async function sudoProblem(): Promise<string | undefined> {
+    const r = await shell.exec('sudo -n true')
+    if (r.code === 0) return undefined
+    if (/\btty\b|requiretty/iu.test(r.stderr)) return `sudo needs a terminal for ${login} (turn off requiretty for this user in sudoers)`
+    return `passwordless sudo is required for ${login}`
+  }
+
   async function dirs(): Promise<Dirs> {
     if (homeCache) return homeCache
     const home = (await must(`printf '%s\\n' "$HOME"`, 'reading the home directory')).trim()
     if (!home.startsWith('/') || home === '/') throw new Error(`the home directory of ${login} on ${target.host} is not usable`)
-    return (homeCache = { home, bin: `${home}/.agentry/bin`, sandboxes: `${home}/.agentry/sandboxes` })
+    const uid = Number((await must('id -u', 'reading the user id')).trim())
+    if (!Number.isInteger(uid) || uid < 0) throw new Error(`the user id of ${login} on ${target.host} is not usable`)
+    return (homeCache = { uid, home, bin: `${home}/.agentry/bin`, sandboxes: `${home}/.agentry/sandboxes` })
   }
 
   async function arch(): Promise<Arch> {
@@ -217,24 +236,34 @@ export function createSshMachineDriver(
     throw new Error(`no free port for envd on ${target.host}`)
   }
 
-  // ---- firewall: envd answers on loopback only ----
-  const rule = (id: string, port: number) => `INPUT -p tcp --dport ${String(port)} ${sq('!')} -i lo -m comment --comment ${sq(`agentry-${id}`)} -j DROP`
+  // ---- firewall: envd answers on loopback, to the login user only ----
+  const rules = (d: Dirs, id: string, port: number) => {
+    const tag = `-m comment --comment ${sq(`agentry-${id}`)}`
+    return [
+      `INPUT -p tcp --dport ${String(port)} ${sq('!')} -i lo ${tag} -j DROP`,
+      `OUTPUT -o lo -p tcp --dport ${String(port)} -m owner ${sq('!')} --uid-owner ${String(d.uid)} ${tag} -j REJECT`,
+    ]
+  }
   async function noIpv6(): Promise<boolean> {
     const r = await shell.exec('cat /proc/net/if_inet6')
     return r.code !== 0 || r.stdout.trim() === ''
   }
-  async function ensureRules(id: string, port: number): Promise<void> {
+  async function ensureRules(d: Dirs, id: string, port: number): Promise<void> {
     for (const tool of ['iptables', 'ip6tables'] as const) {
-      if ((await shell.exec(`sudo -n ${tool} -C ${rule(id, port)}`)).code === 0) continue
-      const ins = await shell.exec(`sudo -n ${tool} -I ${rule(id, port)}`)
-      if (ins.code === 0) continue
-      if (tool === 'ip6tables' && (await noIpv6())) continue
-      throw new Error(`cannot restrict envd to loopback on ${target.host}: ${why(ins)}`)
+      for (const rule of rules(d, id, port)) {
+        if ((await shell.exec(`sudo -n ${tool} -C ${rule}`)).code === 0) continue
+        const ins = await shell.exec(`sudo -n ${tool} -I ${rule}`)
+        if (ins.code === 0) continue
+        if (tool === 'ip6tables' && (await noIpv6())) continue
+        throw new Error(`cannot restrict envd to loopback on ${target.host}: ${why(ins)}`)
+      }
     }
   }
-  async function removeRules(id: string, port: number): Promise<void> {
+  async function removeRules(d: Dirs, id: string, port: number): Promise<void> {
     for (const tool of ['iptables', 'ip6tables'] as const) {
-      for (let i = 0; i < 5; i++) if ((await shell.exec(`sudo -n ${tool} -D ${rule(id, port)}`)).code !== 0) break
+      for (const rule of rules(d, id, port)) {
+        for (let i = 0; i < 5; i++) if ((await shell.exec(`sudo -n ${tool} -D ${rule}`)).code !== 0) break
+      }
     }
   }
 
@@ -244,19 +273,32 @@ export function createSshMachineDriver(
     const pid = Number(r.stdout.trim())
     return r.code === 0 && Number.isInteger(pid) && pid > 1 ? pid : undefined
   }
-  /** envd is alive when the recorded pid still runs our envd binary (a reused pid after a reboot does not). */
-  async function alive(d: Dirs, id: string, a: Arch): Promise<number | undefined> {
+  /**
+   * envd is alive when the recorded pid (envd's own, it is the session leader) still runs an envd binary of ours:
+   * any version, so an upgrade does not hide a running envd; a reused pid after a reboot does not match.
+   */
+  async function alive(d: Dirs, id: string): Promise<number | undefined> {
     const pid = await pidOf(d, id)
     if (pid === undefined) return undefined
     const r = await shell.exec(`cat -- /proc/${String(pid)}/cmdline`)
-    return r.code === 0 && r.stdout.includes(binPath(d, a)) ? pid : undefined
+    return r.code === 0 && r.stdout.includes(`${d.bin}/envd-`) ? pid : undefined
   }
-  async function killEnvd(d: Dirs, id: string, a: Arch): Promise<void> {
-    const pid = await alive(d, id, a)
+  /** Stops envd and everything in its session (agent processes included); throws when something survives SIGKILL. */
+  async function killEnvd(d: Dirs, id: string): Promise<void> {
+    const pid = await pidOf(d, id)
     if (pid !== undefined) {
-      await shell.exec(`sudo -n kill -TERM -- ${String(pid)}`)
-      for (let i = 0; i < 20 && (await alive(d, id, a)) !== undefined; i++) await sleep(250)
-      if ((await alive(d, id, a)) !== undefined) await shell.exec(`sudo -n kill -KILL -- ${String(pid)}`)
+      const members = async () => (await shell.exec(`pgrep -s ${String(pid)}`)).code === 0
+      const running = async () => (await alive(d, id)) !== undefined || (await members())
+      // A pid that runs something else was reused after a reboot: not ours. A session whose leader is gone is still ours.
+      const leaderGone = (await shell.exec(`cat -- /proc/${String(pid)}/cmdline`)).code !== 0
+      if ((await alive(d, id)) !== undefined || (leaderGone && (await members()))) {
+        for (const [signal, tries] of [['TERM', 20], ['KILL', 12]] as const) {
+          await shell.exec(`sudo -n pkill -${signal} -s ${String(pid)}`)
+          for (let i = 0; i < tries && (await running()); i++) await sleep(250)
+          if (!(await running())) break
+        }
+        if (await running()) throw new Error(`envd (pid ${String(pid)}) did not stop on ${target.host}; its firewall rules are kept`)
+      }
     }
     await shell.exec(`rm -f -- ${sq(`${sbDir(d, id)}/envd.pid`)}`)
   }
@@ -276,19 +318,26 @@ export function createSshMachineDriver(
     }
   }
 
-  /** Adds the firewall rules, then starts envd detached and waits until it answers. */
+  /** Adds the firewall rules, then starts envd detached in its own session and waits until it answers. */
   async function launch(d: Dirs, id: string, a: Arch, port: number): Promise<void> {
-    await ensureRules(id, port)
+    await ensureRules(d, id, port)
     const dir = sbDir(d, id)
-    const script = `nohup sudo -n ${sq(binPath(d, a))} --isnotfc --no-cgroups --port ${String(port)} > ${sq(`${dir}/envd.log`)} 2>&1 < /dev/null & echo $! > ${sq(`${dir}/envd.pid`)}`
+    await shell.exec(`rm -f -- ${sq(`${dir}/envd.pid`)}`)
+    // setsid: envd leads a session whose id is its pid, so stop can end everything started under it. The shell
+    // records its own pid and execs envd, so the recorded pid is envd's, not sudo's.
+    const inner = `echo $$ > ${sq(`${dir}/envd.pid`)} && exec ${sq(binPath(d, a))} --isnotfc --no-cgroups --port ${String(port)}`
+    const script = `nohup sudo -n setsid sh -c ${sq(inner)} > ${sq(`${dir}/envd.log`)} 2>&1 < /dev/null &`
     await must(`sh -c ${sq(script)}`, 'starting envd')
-    const deadline = Date.now() + config.startTimeoutMs
+    const began = Date.now()
+    const deadline = began + config.startTimeoutMs
     for (;;) {
-      if ((await alive(d, id, a)) === undefined) {
-        const log = (await shell.exec(`tail -n 10 -- ${sq(`${dir}/envd.log`)}`)).stdout.trim()
-        throw new Error(`envd exited on ${target.host}${log ? `: ${log.slice(-400)}` : ''}`)
-      }
-      if (await healthy(port)) return
+      if ((await alive(d, id)) === undefined) {
+        // The pid file is written a moment after the launch returns.
+        if ((await pidOf(d, id)) !== undefined || Date.now() - began > 3_000) {
+          const log = (await shell.exec(`tail -n 10 -- ${sq(`${dir}/envd.log`)}`)).stdout.trim()
+          throw new Error(`envd exited on ${target.host}${log ? `: ${log.slice(-400)}` : ''}`)
+        }
+      } else if (await healthy(port)) return
       if (Date.now() >= deadline) throw new Error(`envd did not answer on ${target.host} within ${String(config.startTimeoutMs)} ms`)
       await sleep(250)
     }
@@ -299,15 +348,26 @@ export function createSshMachineDriver(
     return gpuIds.length > 0 ? { ...rest, gpuIds: gpuIds.join(',') } : rest
   }
 
+  /** Whether `workspace` is one this driver created for `id`: a `sandbox-...` directory whose marker holds the id. */
+  async function ownsWorkspace(id: string, workspace: string): Promise<string | undefined> {
+    if (!OWNED_NAME.test(posix.basename(workspace))) return `its name does not start with "sandbox-"`
+    const marker = await shell.exec(`cat -- ${sq(`${workspace}/${MARKER}`)}`)
+    if (marker.code !== 0 || marker.stdout.trim() !== id) return `it was not created by sandbox ${id}`
+    return undefined
+  }
+
   async function destroyBy(id: string, recorded: { workspace?: string; port?: number }, removeWorkspace: boolean): Promise<void> {
     const d = await dirs()
     const dir = sbDir(d, id)
     // Validated before anything is stopped or deleted.
     const workspace = removeWorkspace && recorded.workspace !== undefined ? safeWorkspace(recorded.workspace, d.home) : undefined
-    const a = await arch().catch(() => undefined)
-    if (a) await killEnvd(d, id, a)
-    if (recorded.port !== undefined) await removeRules(id, recorded.port)
-    if (workspace !== undefined) await must(`sudo -n rm -rf -- ${sq(workspace)}`, 'removing the workspace')
+    await killEnvd(d, id)
+    if (recorded.port !== undefined) await removeRules(d, id, recorded.port)
+    if (workspace !== undefined) {
+      const refusal = await ownsWorkspace(id, workspace)
+      if (refusal) console.warn(`[agentry-sandbox] left the workspace ${workspace} on ${target.host} in place: ${refusal}`)
+      else await must(`sudo -n rm -rf -- ${sq(workspace)}`, 'removing the workspace')
+    }
     await must(`sudo -n rm -rf -- ${sq(dir)}`, 'removing the sandbox directory')
   }
 
@@ -321,7 +381,8 @@ export function createSshMachineDriver(
     async probe() {
       if (!pinned && !place.allowUnpinnedProbe) return { ok: false, reason: 'host key not confirmed' }
       try {
-        if ((await shell.exec('sudo -n true')).code !== 0) return { ok: false, reason: `passwordless sudo is required for ${login}` }
+        const sudo = await sudoProblem()
+        if (sudo) return { ok: false, reason: sudo }
         const m = (await must('uname -m', 'reading the architecture')).trim()
         if (m !== 'x86_64' && m !== 'aarch64' && m !== 'arm64') return { ok: false, reason: `unsupported architecture ${m}` }
         const kernel = first(await must('uname -sr', 'reading the kernel version'))
@@ -356,7 +417,8 @@ export function createSshMachineDriver(
     async create(id, owner, spec, ctx) {
       return guarded(async () => {
         if (!ID.test(id)) throw new Error('invalid sandbox id')
-        if ((await shell.exec('sudo -n true')).code !== 0) throw new Error(`passwordless sudo is required for ${login}`)
+        const sudo = await sudoProblem()
+        if (sudo) throw new Error(sudo)
         const a = await arch()
         const d = await dirs()
         const workspace = safeWorkspace(spec.workspacePath ?? DEFAULT_WORKSPACE, d.home)
@@ -368,18 +430,23 @@ export function createSshMachineDriver(
             const metas = await readMetas(d)
             const clash = metas.find((m) => m.id !== id && posix.normalize(m.workspace) === workspace)
             if (clash) throw new Error(`the workspace ${workspace} is already used by sandbox ${clash.id} on ${target.host}; give this sandbox its own workspace_path`)
+            // Only a directory this driver makes is ever chowned or deleted.
+            if ((await shell.exec(`test -e ${sq(workspace)}`)).code === 0) throw new Error(`the workspace ${workspace} already exists on ${target.host}; give this sandbox a workspace_path that does not exist yet`)
             const p = await freePort(d, id)
             await must(`mkdir -p -- ${sq(sbDir(d, id))}`, 'creating the sandbox directory')
             await writeMeta(d, { id, owner, workspace, port: p })
+            createdWorkspace = true
+            await must(`sudo -n mkdir -p -- ${sq(workspace)}`, 'creating the workspace')
+            await must(`sudo -n chown -- ${sq(login)} ${sq(workspace)}`, 'giving the workspace to the login user')
+            await shell.writeFile(`${workspace}/${MARKER}`, Buffer.from(`${id}\n`))
             return p
           })
-          createdWorkspace = (await shell.exec(`test -d ${sq(workspace)}`)).code !== 0
-          await must(`sudo -n mkdir -p -- ${sq(workspace)}`, 'creating the workspace')
-          await must(`sudo -n chown -- ${sq(login)} ${sq(workspace)}`, 'giving the workspace to the login user')
           await launch(d, id, a, port)
           return gpuHandle({ id, port: String(port), workspace }, ctx.gpuIds)
         } catch (e) {
-          await destroyBy(id, { workspace, ...(port !== undefined ? { port } : {}) }, createdWorkspace).catch(() => {})
+          // A failed create removes what it made: a workspace that holds only its marker goes with it.
+          await destroyBy(id, { workspace, ...(port !== undefined ? { port } : {}) }, false).catch(() => {})
+          if (createdWorkspace) await shell.exec(`sudo -n rm -f -- ${sq(`${workspace}/${MARKER}`)}`).then(() => shell.exec(`sudo -n rmdir -- ${sq(workspace)}`)).catch(() => {})
           throw e
         }
       })
@@ -399,23 +466,23 @@ export function createSshMachineDriver(
         await must(`sudo -n mkdir -p -- ${sq(workspace)}`, 'creating the workspace')
         // Rules are re-checked on every start, before anything can listen.
         if (port !== undefined) {
-          await ensureRules(id, port)
-          if ((await alive(d, id, a)) !== undefined && (await healthy(port))) return gpuHandle({ ...handle, id, port: String(port), workspace }, ctx.gpuIds)
+          await ensureRules(d, id, port)
+          if ((await alive(d, id)) !== undefined && (await healthy(port))) return gpuHandle({ ...handle, id, port: String(port), workspace }, ctx.gpuIds)
         }
         try {
-          await killEnvd(d, id, a) // a stale or half-dead envd
+          await killEnvd(d, id) // a stale or half-dead envd
           const next = await portLock(async () => {
             const p = await freePort(d, id, port)
             if (p !== meta?.port) await writeMeta(d, { id, owner: meta?.owner ?? '', workspace, port: p })
             return p
           })
-          if (port !== undefined && port !== next) await removeRules(id, port)
+          if (port !== undefined && port !== next) await removeRules(d, id, port)
           port = next
           await launch(d, id, a, port)
           return gpuHandle({ ...handle, id, port: String(port), workspace }, ctx.gpuIds)
         } catch (e) {
-          await killEnvd(d, id, a).catch(() => {})
-          if (port !== undefined) await removeRules(id, port).catch(() => {})
+          // Rules go only once envd is confirmed gone.
+          await killEnvd(d, id).then(() => (port !== undefined ? removeRules(d, id, port) : undefined)).catch(() => {})
           throw e
         }
       })
@@ -426,10 +493,9 @@ export function createSshMachineDriver(
         const id = handle.id
         if (!id) return
         const d = await dirs()
-        const a = await arch()
-        await killEnvd(d, id, a)
+        await killEnvd(d, id) // throws when envd survives: the rules stay
         const port = Number(handle.port)
-        if (Number.isInteger(port) && port > 0) await removeRules(id, port)
+        if (Number.isInteger(port) && port > 0) await removeRules(d, id, port)
       })
     },
 
@@ -456,7 +522,7 @@ export function createSshMachineDriver(
         const d = await dirs()
         if ((await shell.exec(`test -d ${sq(sbDir(d, id))}`)).code !== 0) return 'missing'
         const port = Number(handle.port)
-        if ((await alive(d, id, await arch())) !== undefined && Number.isInteger(port) && (await healthy(port))) return 'running'
+        if ((await alive(d, id)) !== undefined && Number.isInteger(port) && (await healthy(port))) return 'running'
         return 'stopped'
       })
     },

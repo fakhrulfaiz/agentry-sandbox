@@ -67,6 +67,25 @@ describe.skipIf(!dockerAvailable)('bootstrap', () => {
     expect((await run('sbx_b', 'agent', 'cat /opt/agentry/dsh/marker')).stdout).toBe('x')
   }, 60_000)
 
+  it('I5: the runtime is installed under a lock beside the target, skipped when the machine has it, and the old one kept', async () => {
+    const { driver, opts, copies } = setup('sbx_b')
+    const h = await bootstrap(driver, 'sbx_b', {}, {}, opts)
+    const inode = () => run('sbx_b', 'root', 'stat -c %i /opt/agentry/dsh/marker; cat /opt/agentry/dsh/.agentry-ref; ls -A /opt/agentry /tmp | grep -c "dsh.*tar\\|tmp-" || true')
+    const first = (await inode()).stdout
+    expect(first).toMatch(/rt-1/u)
+    expect(first.trim().split('\n').at(-1)).toBe('0') // no tar or temp directory left behind
+    // Another sandbox of the same machine (no `dsh` in its handle) finds the runtime installed and copies nothing.
+    const { dsh: _d, ...other } = h
+    await bootstrap(driver, 'sbx_b', other, {}, opts)
+    expect(copies()).toBe(1)
+    expect((await inode()).stdout).toBe(first) // the installed runtime was not replaced
+    // A new runtime ref replaces it, and the previous one stays as dsh.prev.
+    await bootstrap(driver, 'sbx_b', h, {}, { ...opts, dshRef: 'rt-2' })
+    expect(copies()).toBe(2)
+    const r = await run('sbx_b', 'root', 'cat /opt/agentry/dsh/.agentry-ref /opt/agentry/dsh.prev/.agentry-ref')
+    expect(r.stdout.split('\n').slice(0, 2)).toEqual(['rt-2', 'rt-1'])
+  }, 60_000)
+
   it('I1: a recreated container (new GPUs) redoes the agent user and packages but not template files or setup commands', async () => {
     const { driver, opts } = setup('sbx_b')
     const spec = { files: [{ path: 'a.txt', content: 'template' }], setupCommands: ['echo ran >> /workspace/log'] }

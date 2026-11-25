@@ -7,6 +7,7 @@
 ## 2026-11-25 — SSH machine places
 
 - A new place kind, `ssh-machine` ("Machine over SSH"): sandboxes run directly on a Linux machine over SSH (no Docker, no isolation, the SSH user's passwordless sudo) with a loopback-only firewall rule per sandbox; the admin page offers it next to Docker over SSH, with a warning. It cannot reset a sandbox. README "SSH machine places" lists the requirements and what is written on the machine.
+- SSH machine places, after the final review: a workspace must not exist yet and is deleted only when it is a marked `sandbox-...` directory the sandbox created; envd runs in its own session and stop ends that whole session (a process that starts a new session escapes), keeping the firewall rules if envd survives; other local users are rejected from envd's loopback port; the DSH runtime is installed under a lock, skipped when current and the old one kept as `dsh.prev`; pulling an image for another architecture no longer re-tags the host's image (local Docker sandboxes were affected).
 
 ## 2026-11-25 — places
 

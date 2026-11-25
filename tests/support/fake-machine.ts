@@ -25,7 +25,9 @@ export const fpOf = (publicKey: string) => fingerprint(Buffer.from(publicKey.spl
 interface Proc {
   cmdline: string[]
   port: number
-  server: http.Server
+  /** The session id: the pid of the session leader (envd). */
+  sid: number
+  server?: http.Server
 }
 
 export interface Machine {
@@ -47,6 +49,12 @@ export interface Machine {
   /** The rm targets executed. */
   removed: string[]
   procs: Map<number, Proc>
+  /** Starts a process in an existing session, like something an agent launched under envd; returns its pid. */
+  spawnChild(sid: number, name?: string): number
+  /** pkill leaves processes alive (a process that cannot be killed). */
+  unkillable: boolean
+  /** What sudo says on stderr when `sudo` is false. */
+  sudoErr: string
   rules: Set<string>
   /** Ports something else listens on. */
   busy: Set<number>
@@ -102,10 +110,17 @@ export async function startMachine(opts: { host?: string } = {}): Promise<Machin
     rmOutside: [],
     removed: [],
     procs: new Map(),
+    spawnChild(sid, name = 'train.py') {
+      const pid = nextPid++
+      m.procs.set(pid, { cmdline: [name], port: 0, sid })
+      return pid
+    },
+    unkillable: false,
+    sudoErr: 'sudo: a password is required',
     rules: new Set(),
     busy: new Set(),
     async reboot() {
-      for (const p of m.procs.values()) await new Promise<void>((r) => { p.server.closeAllConnections(); p.server.close(() => r()) })
+      for (const p of m.procs.values()) if (p.server) await new Promise<void>((r) => { p.server!.closeAllConnections(); p.server!.close(() => r()) })
       m.procs.clear()
       m.rules.clear()
     },
@@ -134,7 +149,7 @@ export async function startMachine(opts: { host?: string } = {}): Promise<Machin
       fs.writeFileSync(pidFile, `${String(pid)}\n`)
       return ok()
     }
-    m.procs.set(pid, { cmdline: argv, port, server })
+    m.procs.set(pid, { cmdline: argv, port, sid: pid, server })
     fs.writeFileSync(logFile, '')
     fs.writeFileSync(pidFile, `${String(pid)}\n`)
     return ok()
@@ -149,12 +164,13 @@ export async function startMachine(opts: { host?: string } = {}): Promise<Machin
   async function runScript(script: string): Promise<R> {
     const w = words(script, home)
     if (w[0] === 'nohup') {
-      const amp = w.indexOf('&')
+      // nohup sudo -n setsid sh -c '<echo $$ > PID && exec ENVD args>' > LOG 2>&1 < /dev/null &
       const gt = w.indexOf('>')
-      const argv = w.slice(1, gt)
-      if (!m.sudo) return fail('sudo: a password is required')
-      const pidFile = w[w.lastIndexOf('>') + 1]!
-      return startEnvd(argv, w[gt + 1]!, pidFile).then((r) => (amp > 0 ? r : fail('not backgrounded')))
+      if (!m.sudo) return fail(m.sudoErr)
+      const inner = words(w[w.indexOf('-c') + 1]!, home)
+      const pidFile = inner[inner.indexOf('>') + 1]!
+      const argv = inner.slice(inner.indexOf('exec') + 1)
+      return startEnvd(argv, w[gt + 1]!, pidFile).then((r) => (w.at(-1) === '&' ? r : fail('not backgrounded')))
     }
     return fail(`fake: unsupported script ${script}`, 127)
   }
@@ -163,7 +179,7 @@ export async function startMachine(opts: { host?: string } = {}): Promise<Machin
     const [cmd, ...a] = w
     switch (cmd) {
       case 'sudo': {
-        if (!m.sudo) return fail('sudo: a password is required')
+        if (!m.sudo) return fail(m.sudoErr)
         if (a[0] !== '-n') return fail('fake: sudo without -n', 127)
         if (a[1] === 'true') return ok()
         return simple(a.slice(1), true)
@@ -174,6 +190,32 @@ export async function startMachine(opts: { host?: string } = {}): Promise<Machin
         return m.gpus ? ok(m.gpus) : fail('nvidia-smi: command not found', 127)
       case 'printf':
         return ok(`${home}\n`)
+      case 'id':
+        return ok('1000\n')
+      case 'rmdir': {
+        const t = a[a.indexOf('--') + 1]!
+        try {
+          fs.rmdirSync(t)
+          return ok()
+        } catch {
+          return fail('rmdir: failed to remove: Directory not empty')
+        }
+      }
+      case 'pgrep': {
+        const sid = Number(a[a.indexOf('-s') + 1])
+        return [...m.procs.values()].some((p) => p.sid === sid) ? ok() : fail()
+      }
+      case 'pkill': {
+        const sid = Number(a[a.indexOf('-s') + 1])
+        if (m.unkillable) return ok()
+        for (const [pid, p] of m.procs) {
+          if (p.sid !== sid) continue
+          m.procs.delete(pid)
+          p.server?.closeAllConnections()
+          p.server?.close()
+        }
+        return ok()
+      }
       case 'sha256sum': {
         const f = a[1]!
         return fs.existsSync(f) ? ok(`${createHash('sha256').update(fs.readFileSync(f)).digest('hex')}  ${f}\n`) : fail(`sha256sum: ${f}: No such file or directory`)
@@ -229,7 +271,7 @@ export async function startMachine(opts: { host?: string } = {}): Promise<Machin
       case 'tail':
         return fs.existsSync(a[a.length - 1]!) ? ok(fs.readFileSync(a[a.length - 1]!, 'utf8')) : fail()
       case 'ss': {
-        const ports = new Set([...m.busy, ...[...m.procs.values()].map((p) => p.port)])
+        const ports = new Set([...m.busy, ...[...m.procs.values()].filter((p) => p.port).map((p) => p.port)])
         return ok(`State Recv-Q Send-Q Local Address:Port Peer Address:Port\n${[...ports].map((p) => `LISTEN 0 128 0.0.0.0:${String(p)} 0.0.0.0:*`).join('\n')}\n`)
       }
       case 'kill': {
@@ -237,8 +279,8 @@ export async function startMachine(opts: { host?: string } = {}): Promise<Machin
         const p = m.procs.get(pid)
         if (!p) return fail('kill: no such process')
         m.procs.delete(pid)
-        p.server.closeAllConnections()
-        p.server.close()
+        p.server?.closeAllConnections()
+        p.server?.close()
         return ok()
       }
       case 'iptables':

@@ -6,7 +6,7 @@
 import type Docker from 'dockerode'
 import { extract, pack } from 'tar-stream'
 
-import type { EnsureImage, Platform } from '../places/images.ts'
+import { platformRef, type EnsureImage, type Platform } from '../places/images.ts'
 
 /** Per Docker client (each host has its own architecture), then per image. */
 const cache = new WeakMap<Docker, Map<string, Promise<Buffer>>>()
@@ -19,7 +19,7 @@ function cacheOf<T>(store: WeakMap<Docker, Map<string, Promise<T>>>, docker: Doc
 
 async function readEnvd(docker: Docker, image: string, ensure?: EnsureImage, platform?: Platform): Promise<Buffer> {
   await ensure?.(image, platform)
-  const container = await docker.createContainer({ Image: image, Cmd: ['/envd'], ...(platform ? { platform } : {}) } as Docker.ContainerCreateOptions)
+  const container = await docker.createContainer({ Image: ensure && platform ? platformRef(image, platform) : image, Cmd: ['/envd'], ...(platform ? { platform } : {}) } as Docker.ContainerCreateOptions)
   try {
     const stream = (await container.getArchive({ path: '/envd' })) as NodeJS.ReadableStream
     const ex = extract()
@@ -73,7 +73,7 @@ const trees = new WeakMap<Docker, Map<string, Promise<Buffer>>>()
 
 async function readTree(docker: Docker, image: string, path: string, ensure?: EnsureImage, platform?: Platform): Promise<Buffer> {
   await ensure?.(image, platform)
-  const container = await docker.createContainer({ Image: image, Cmd: ['/none'], ...(platform ? { platform } : {}) } as Docker.ContainerCreateOptions)
+  const container = await docker.createContainer({ Image: ensure && platform ? platformRef(image, platform) : image, Cmd: ['/none'], ...(platform ? { platform } : {}) } as Docker.ContainerCreateOptions)
   try {
     const stream = (await container.getArchive({ path })) as NodeJS.ReadableStream
     const parts: Buffer[] = []

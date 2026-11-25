@@ -19,7 +19,8 @@ const DEFAULT_WORKSPACE = '/workspace'
 const workspaceOf = (spec: TemplateSpec) => spec.workspacePath ?? DEFAULT_WORKSPACE
 const AGENT = 'agent'
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-const DSH_TAR = '/tmp/agentry-dsh.tar'
+const DSH_DIR = '/opt/agentry/dsh'
+const DSH_REF_FILE = `${DSH_DIR}/.agentry-ref`
 
 export interface BootstrapOptions {
   /** The service secret envd tokens derive from. */
@@ -110,8 +111,7 @@ export async function bootstrap(driver: Driver, id: string, handle: Handle, spec
     if ((first || copyDsh) && driver.capabilities.runsAsRoot) await envd.init({ ...base, defaultUser: 'root' })
     if (first) await provision(must, envd, spec, workspaceKept, agent, driver.agentUser !== undefined)
     if (copyDsh) {
-      await envd.writeFile(DSH_TAR, new Uint8Array(await source!.tar()), 'root')
-      await must('root', `set -e; mkdir -p /opt/agentry && rm -rf /opt/agentry/dsh && tar -xf ${DSH_TAR} -C /opt/agentry; rm -f ${DSH_TAR}`, 'installing the DSH runtime')
+      await installDsh(must, envd, id, ref, source!.tar)
     }
     await envd.init({ ...base, defaultUser: agent })
     const { recreated: _r, ...rest } = handle
@@ -119,6 +119,36 @@ export async function bootstrap(driver: Driver, id: string, handle: Handle, spec
   } finally {
     ep.release?.()
   }
+}
+
+/**
+ * Copies the DSH runtime to /opt/agentry/dsh. On a machine several sandboxes share this path, so: the tar goes to a
+ * per-sandbox file in a root-owned directory (not /tmp), the copy is skipped when the installed runtime already has
+ * this ref, and the swap runs under a lock, extracting beside the target and renaming it in. The runtime it replaces
+ * is renamed to dsh.prev, not deleted, so a process still running from it is not pulled out from under.
+ */
+async function installDsh(must: Must, envd: ReturnType<typeof createEnvdClient>, id: string, ref: string, tar: () => Promise<Buffer>): Promise<void> {
+  const safe = id.replace(/[^A-Za-z0-9_-]/gu, '_')
+  const tarPath = `/opt/agentry/.dsh-${safe}.tar`
+  const tmp = `/opt/agentry/dsh.tmp-${safe}`
+  await must('root', 'mkdir -p /opt/agentry', 'preparing /opt/agentry')
+  const current = await runInEnvd(envd, 'root', `cat ${sq(DSH_REF_FILE)} 2>/dev/null`, { cwd: '/' })
+  if (current.stdout.trim() === ref) return
+  await envd.writeFile(tarPath, new Uint8Array(await tar()), 'root')
+  const script = `set -e
+exec 9>/opt/agentry/.dsh.lock
+flock 9
+if [ "$(cat ${sq(DSH_REF_FILE)} 2>/dev/null)" = ${sq(ref)} ]; then rm -f ${sq(tarPath)}; exit 0; fi
+rm -rf ${sq(tmp)}
+mkdir -p ${sq(tmp)}
+tar -xf ${sq(tarPath)} -C ${sq(tmp)}
+printf '%s\\n' ${sq(ref)} > ${sq(`${tmp}/dsh/.agentry-ref`)}
+rm -rf /opt/agentry/dsh.prev
+if [ -e ${DSH_DIR} ]; then mv ${DSH_DIR} /opt/agentry/dsh.prev; fi
+mv ${sq(`${tmp}/dsh`)} ${DSH_DIR}
+rm -rf ${sq(tmp)}
+rm -f ${sq(tarPath)}`
+  await must('root', script, 'installing the DSH runtime')
 }
 
 type Must = (user: string, script: string, what: string, cwd?: string) => Promise<void>

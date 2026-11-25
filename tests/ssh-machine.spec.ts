@@ -18,7 +18,7 @@ async function setup(tweak: (m: Machine) => void = () => {}, hostKeyPin = fpOf(h
   const platforms: string[] = []
   const driver = createSshMachineDriver(config, { target: `ssh://deploy@127.0.0.1:${String(machine.port)}`, privateKey: userKey.private, hostKey: hostKeyPin }, { envdBinary: async (p) => { platforms.push(p); return Buffer.from(`envd binary for ${p}`) } })
   cleanups.push(() => machine.close(), () => driver.close?.())
-  const ws = (name: string) => `${machine.home}/work/${name}`
+  const ws = (name: string) => `${machine.home}/work/sandbox-${name}`
   return { machine, driver, platforms, ws }
 }
 
@@ -53,8 +53,8 @@ describe('ssh-machine driver', () => {
     // The busy base port is skipped; the port is recorded.
     expect(Number(h.port)).toBe(portBase('sbx_a') + 1)
     const [proc] = [...machine.procs.values()]
-    expect(proc!.cmdline.join(' ')).toBe(`sudo -n ${bin} --isnotfc --no-cgroups --port ${h.port!}`)
-    expect(machine.log.some((c) => c.startsWith('sh -c ') && c.includes(sq(`sudo -n '${bin}' --isnotfc --no-cgroups --port ${h.port!}`).slice(1, -1)))).toBe(true)
+    expect(proc!.cmdline.join(' ')).toBe(`${bin} --isnotfc --no-cgroups --port ${h.port!}`)
+    expect(machine.log.some((c) => c.startsWith('sh -c ') && c.includes('sudo -n setsid sh -c') && c.includes(bin) && c.includes(`--port ${h.port!}`))).toBe(true)
     const meta = `${machine.home}/.agentry/sandboxes/sbx_a`
     expect(JSON.parse(fs.readFileSync(`${meta}/meta.json`, 'utf8'))).toEqual({ id: 'sbx_a', owner: 'owner1', workspace: ws('a'), port: Number(h.port) })
     expect(fs.existsSync(`${meta}/envd.pid`)).toBe(true)
@@ -93,7 +93,7 @@ describe('ssh-machine driver', () => {
     expect(await driver.status(h2)).toBe('running')
     expect(h2.port).toBe(h.port)
     expect(machine.procs.size).toBe(1)
-    expect(machine.rules.size).toBe(2)
+    expect(machine.rules.size).toBe(4)
     expect(fs.readFileSync(`${ws('a')}/keep.txt`, 'utf8')).toBe('mine')
     // A start on a healthy sandbox starts nothing new.
     const before = [...machine.procs.keys()]
@@ -140,7 +140,7 @@ describe('ssh-machine driver', () => {
     expect(fs.existsSync(binOf(machine))).toBe(true)
     expect(fs.existsSync(ws('b'))).toBe(true)
     expect(machine.procs.size).toBe(1)
-    expect(machine.rules.size).toBe(2) // sbx_b's pair stays
+    expect(machine.rules.size).toBe(4) // sbx_b's rules stay
     expect(machine.rmOutside).toEqual([])
     // Keeping the workspace removes only the sandbox dir; an empty handle works from meta.json.
     const b = await driver.listManaged()
@@ -155,7 +155,8 @@ describe('ssh-machine driver', () => {
     const { machine, driver, ws } = await setup()
     const h = await driver.create('sbx_a', 'o', { workspacePath: ws('a') }, { gpuIds: [] })
     const rule = (tool: string) => `${tool} INPUT -p tcp --dport ${h.port!} ! -i lo -m comment --comment agentry-sbx_a -j DROP`
-    expect([...machine.rules].sort()).toEqual([rule('ip6tables'), rule('iptables')])
+    const owner = (tool: string) => `${tool} OUTPUT -o lo -p tcp --dport ${h.port!} -m owner ! --uid-owner 1000 -m comment --comment agentry-sbx_a -j REJECT`
+    expect([...machine.rules].sort()).toEqual([rule('ip6tables'), rule('iptables'), owner('ip6tables'), owner('iptables')].sort())
     const launch = idx(machine.log, 'nohup')
     expect(idx(machine.log, 'iptables -I')).toBeGreaterThan(-1)
     expect(idx(machine.log, 'iptables -I')).toBeLessThan(launch)
@@ -183,7 +184,7 @@ describe('ssh-machine driver', () => {
   it('stop removes the rules', async () => {
     const { machine, driver, ws } = await setup()
     const h = await driver.create('sbx_a', 'o', { workspacePath: ws('a') }, { gpuIds: [] })
-    expect(machine.rules.size).toBe(2)
+    expect(machine.rules.size).toBe(4)
     await driver.stop(h)
     expect(machine.rules.size).toBe(0)
     expect(machine.procs.size).toBe(0)
@@ -235,5 +236,105 @@ describe('ssh-machine driver', () => {
     expect(await driver.probe()).toEqual({ ok: false, reason: 'host key changed', hostKeyChanged: true })
     await expect(driver.create('sbx_a', 'o', { workspacePath: ws('a') }, { gpuIds: [] })).rejects.toBeInstanceOf(HostKeyChangedError)
     expect(machine.log).toEqual([])
+  })
+
+  describe('final review fixes', () => {
+    const sandboxes = (m: Machine) => `${m.home}/.agentry/sandboxes`
+
+    it('M1: a requiretty box is told to turn requiretty off', async () => {
+      const { driver } = await setup((m) => { m.sudo = false; m.sudoErr = 'sudo: sorry, you must have a tty to run sudo' })
+      expect(await driver.probe()).toEqual({ ok: false, reason: 'sudo needs a terminal for deploy (turn off requiretty for this user in sudoers)' })
+    })
+
+    it('I1: a pre-existing workspace is refused, untouched, and never deleted', async () => {
+      const { machine, driver, ws } = await setup()
+      fs.mkdirSync(ws('data'), { recursive: true })
+      fs.writeFileSync(`${ws('data')}/precious`, 'x')
+      await expect(driver.create('sbx_a', 'o', { workspacePath: ws('data') }, { gpuIds: [] })).rejects.toThrow(/already exists/u)
+      expect(fs.readFileSync(`${ws('data')}/precious`, 'utf8')).toBe('x')
+      expect(machine.log.some((c) => c.includes('chown'))).toBe(false)
+      expect(machine.removed).toEqual([`${sandboxes(machine)}/sbx_a`]) // only its own (empty) sandbox directory
+      expect(machine.procs.size).toBe(0)
+      expect(fs.existsSync(`${sandboxes(machine)}/sbx_a`)).toBe(false)
+    })
+
+    it('I1: destroy deletes only a sandbox-named workspace whose marker holds its id', async () => {
+      const { machine, driver, ws } = await setup()
+      const own = await driver.create('sbx_a', 'o', { workspacePath: ws('a') }, { gpuIds: [] })
+      expect(fs.readFileSync(`${ws('a')}/.agentry-sandbox`, 'utf8').trim()).toBe('sbx_a')
+      // The marker names someone else: left alone, the sandbox itself still goes.
+      fs.writeFileSync(`${ws('a')}/.agentry-sandbox`, 'sbx_other\n')
+      await driver.destroy('sbx_a', own, { keepWorkspace: false })
+      expect(fs.existsSync(ws('a'))).toBe(true)
+      expect(fs.existsSync(`${sandboxes(machine)}/sbx_a`)).toBe(false)
+      expect(machine.removed).toEqual([`${sandboxes(machine)}/sbx_a`])
+      // A workspace not named sandbox-... (the default /workspace style) is never deleted either.
+      const plain = `${machine.home}/work/data`
+      const b = await driver.create('sbx_b', 'o', { workspacePath: plain }, { gpuIds: [] })
+      await driver.destroy('sbx_b', b, { keepWorkspace: false })
+      expect(fs.existsSync(plain)).toBe(true)
+      expect(machine.removed).not.toContain(plain)
+      // The normal case still removes it.
+      const c = await driver.create('sbx_c', 'o', { workspacePath: ws('c') }, { gpuIds: [] })
+      await driver.destroy('sbx_c', c, { keepWorkspace: false })
+      expect(fs.existsSync(ws('c'))).toBe(false)
+    })
+
+    it('I2: the recorded pid is envd itself, and stop still finds it after an envd upgrade', async () => {
+      const { machine, driver, ws } = await setup()
+      const h = await driver.create('sbx_a', 'o', { workspacePath: ws('a') }, { gpuIds: [] })
+      const pid = Number(fs.readFileSync(`${sandboxes(machine)}/sbx_a/envd.pid`, 'utf8').trim())
+      expect(machine.procs.get(pid)!.cmdline[0]).toBe(binOf(machine)) // not sudo
+      // The operator bumps AGENTRY_SANDBOX_ENVD_IMAGE: a driver for the new version must still stop the old envd.
+      const upgraded = loadConfig({ AGENTRY_SANDBOX_DATABASE_URL: 'postgres://x@localhost/x', AGENTRY_SANDBOX_API_KEYS: `sha256:${'a'.repeat(64)}`, AGENTRY_SANDBOX_SECRET: 's'.repeat(32), AGENTRY_SANDBOX_ENVD_IMAGE: 'ghcr.io/fakhrulfaiz/agentry-envd:envd-v0.7.0' })
+      const d2 = createSshMachineDriver(upgraded, { target: `ssh://deploy@127.0.0.1:${String(machine.port)}`, privateKey: userKey.private, hostKey: fpOf(hostKey.public) })
+      cleanups.push(() => d2.close?.())
+      await d2.stop(h)
+      expect(machine.procs.size).toBe(0)
+      expect(machine.rules.size).toBe(0)
+    })
+
+    it('I2: rules stay and stop fails while envd cannot be stopped', async () => {
+      const { machine, driver, ws } = await setup()
+      const h = await driver.create('sbx_a', 'o', { workspacePath: ws('a') }, { gpuIds: [] })
+      machine.unkillable = true
+      await expect(driver.stop(h)).rejects.toThrow(/did not stop/u)
+      expect(machine.rules.size).toBe(4)
+      expect(machine.procs.size).toBe(1)
+    })
+
+    it('I3: stop ends everything in envd\'s session', async () => {
+      const { machine, driver, ws } = await setup()
+      const h = await driver.create('sbx_a', 'o', { workspacePath: ws('a') }, { gpuIds: [] })
+      const sid = Number(fs.readFileSync(`${sandboxes(machine)}/sbx_a/envd.pid`, 'utf8').trim())
+      machine.spawnChild(sid)
+      machine.spawnChild(sid, 'node')
+      const other = machine.spawnChild(99_999, 'unrelated')
+      await driver.stop(h)
+      expect([...machine.procs.keys()]).toEqual([other])
+      expect(machine.log.some((c) => c.includes(`pkill -TERM -s ${String(sid)}`))).toBe(true)
+    })
+
+    it('I3: a session whose leader died is still cleaned up on destroy', async () => {
+      const { machine, driver, ws } = await setup()
+      const h = await driver.create('sbx_a', 'o', { workspacePath: ws('a') }, { gpuIds: [] })
+      const sid = Number(fs.readFileSync(`${sandboxes(machine)}/sbx_a/envd.pid`, 'utf8').trim())
+      machine.spawnChild(sid)
+      const leader = machine.procs.get(sid)!
+      leader.server!.closeAllConnections()
+      leader.server!.close()
+      machine.procs.delete(sid) // envd crashed, its child lives on
+      await driver.destroy('sbx_a', h, { keepWorkspace: true })
+      expect(machine.procs.size).toBe(0)
+    })
+
+    it('I4: loopback connections from other users are rejected before envd starts', async () => {
+      const { machine, driver, ws } = await setup()
+      const h = await driver.create('sbx_a', 'o', { workspacePath: ws('a') }, { gpuIds: [] })
+      const owner = [...machine.rules].filter((r) => r.includes('OUTPUT -o lo') && r.includes(`--dport ${h.port!}`) && r.includes('! --uid-owner 1000') && r.endsWith('-j REJECT'))
+      expect(owner).toHaveLength(2)
+      const launch = idx(machine.log, 'nohup')
+      expect(machine.log.findIndex((c) => c.includes('OUTPUT') && c.includes('-I'))).toBeLessThan(launch)
+    })
   })
 })
