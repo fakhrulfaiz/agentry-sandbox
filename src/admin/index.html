@@ -82,6 +82,14 @@ td.actions button { padding: 4px 10px; font-size: 13px; margin-left: 4px; }
 .owners td input[type=text] { width: 100%; min-width: 140px; }
 .savebar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 18px; }
 .savebar .grow { flex: 1; }
+#place-form { margin-top: 14px; display: grid; gap: 8px; max-width: 520px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+#place-form h3 { margin: 0 0 4px; font-size: 15px; }
+#place-form label { font-size: 13px; color: var(--muted); }
+#place-form label.check { display: flex; gap: 8px; align-items: flex-start; color: var(--ink); margin-top: 8px; }
+#place-form label.check input { margin-top: 3px; }
+#place-form input[type=text], #place-form textarea { width: 100%; }
+textarea { font: inherit; font-family: ui-monospace, monospace; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; resize: vertical; }
+textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 640px) {
   header { padding: 12px 16px; }
   section { padding: 16px; }
@@ -140,6 +148,44 @@ td.actions button { padding: 4px 10px; font-size: 13px; margin-left: 4px; }
     </div>
   </section>
 
+  <section id="places" aria-labelledby="places-h">
+    <h2 id="places-h">Places</h2>
+    <p class="lede">Where sandboxes run. The built-in place is Docker on this machine; add other machines that run Docker and are reachable over SSH. New sandboxes go to the default place unless the template names another.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>Kind</th><th>State</th><th>GPUs</th><th>Sandboxes</th><th>Default</th><th>Enabled</th><th><span class="muted">Actions</span></th></tr></thead>
+        <tbody id="place-rows"></tbody>
+      </table>
+    </div>
+    <div class="toolbar" style="margin-top:12px"><button id="add-place">Add a place</button></div>
+    <form id="place-form" hidden autocomplete="off">
+      <h3 id="place-form-h">Add a place (Docker over SSH)</h3>
+      <label for="place-name">Name</label>
+      <input id="place-name" type="text" required maxlength="200" placeholder="GPU box">
+      <label for="place-url">Address</label>
+      <input id="place-url" type="text" required placeholder="ssh://user@host:22" spellcheck="false">
+      <label for="place-key">Private key</label>
+      <textarea id="place-key" rows="5" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+      <div class="help" id="place-key-help">The key is stored encrypted and is never shown again.</div>
+      <label for="place-max">Most sandboxes running at once (optional)</label>
+      <input id="place-max" type="number" min="0" step="1" placeholder="No limit">
+      <div class="toolbar">
+        <button type="button" id="place-test">Test connection</button>
+        <span id="place-test-status" class="muted"></span>
+      </div>
+      <div id="place-test-result" hidden>
+        <div>Host key: <span class="mono" id="place-hostkey"></span></div>
+        <div class="muted" id="place-gpus"></div>
+        <label class="check"><input type="checkbox" id="place-hostkey-confirm"> I trust this host key. Sandboxes will only connect to a machine that presents it.</label>
+      </div>
+      <div id="place-form-error" class="banner bad" role="alert" hidden></div>
+      <div class="toolbar">
+        <button type="submit" class="primary" id="place-save" disabled>Save</button>
+        <button type="button" id="place-cancel">Cancel</button>
+      </div>
+    </form>
+  </section>
+
   <section aria-labelledby="limits-h">
     <h2 id="limits-h">Limits</h2>
     <p class="lede">Changes apply at once, to new requests, and survive restarts. Reset returns every limit to the service's environment settings.</p>
@@ -188,7 +234,7 @@ async function call(method, path, body) {
   const res = await fetch(path, { method, headers: { authorization: `Bearer ${store.get()}`, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined })
   if (res.status === 401) { signOut('That admin key was not accepted.'); throw new Error('signed out') }
   const data = res.headers.get('content-type')?.includes('json') ? await res.json() : null
-  if (!res.ok) throw new Error(data?.error?.message ?? `${method} ${path} failed (${res.status})`)
+  if (!res.ok) throw Object.assign(new Error(data?.error?.message ?? `${method} ${path} failed (${res.status})`), { code: data?.error?.code })
   return data
 }
 
@@ -276,6 +322,114 @@ async function remove(s) {
   try { await call('DELETE', `/v1/admin/sandboxes/${encodeURIComponent(s.id)}`); showError(''); await refresh() } catch (e) { showError(e.message) }
 }
 
+// ---------- places ----------
+const KIND_WORDS = { docker: 'Docker (this machine)', 'docker-ssh': 'Docker over SSH' }
+const HOST_KEY_CHANGED = 'Host key changed — test and confirm the new key'
+let placeList = []
+let editing = null // place being edited, or null when adding
+let tested = null // { host_key } from the last successful test of the current form values
+async function loadPlaces() {
+  placeList = (await call('GET', '/v1/admin/places')).data
+  renderPlaces()
+}
+function gpuText(g) { return g && g.count > 0 ? `${g.count} × ${g.models.join(', ')}` : 'None' }
+function renderPlaces() {
+  $('place-rows').replaceChildren(...placeList.map((p) => {
+    const changed = !p.available && /host key/i.test(p.reason ?? '')
+    const reason = changed ? HOST_KEY_CHANGED : p.reason
+    const isLocal = p.id === 'local'
+    return el('tr', {},
+      el('td', {}, el('div', {}, p.name), el('div', { class: 'mono muted' }, p.id)),
+      el('td', {}, KIND_WORDS[p.kind] ?? p.kind),
+      el('td', {}, el('span', { class: 'pill', title: reason ?? '' }, el('span', { class: `dot ${p.available ? 'running' : 'failed'}` }), p.available ? 'Available' : 'Unavailable'), reason ? el('div', { class: 'muted', style: 'font-size:12px;max-width:260px' }, reason) : null),
+      el('td', {}, gpuText(p.gpus)),
+      el('td', {}, String(p.sandboxes)),
+      el('td', {}, p.default ? 'Default' : ''),
+      el('td', {}, p.enabled ? 'Yes' : 'No'),
+      el('td', { class: 'actions' },
+        !p.default && p.enabled ? el('button', { onclick: () => putPlace(p, { default: true }) }, 'Make default') : null,
+        el('button', { onclick: () => putPlace(p, { enabled: !p.enabled }), disabled: p.default && p.enabled }, p.enabled ? 'Disable' : 'Enable'),
+        isLocal ? null : el('button', { onclick: () => openPlaceForm(p) }, 'Edit'),
+        isLocal ? null : el('button', { class: 'danger', onclick: () => deletePlace(p) }, 'Delete')))
+  }))
+}
+async function putPlace(p, body) {
+  try { await call('PUT', `/v1/admin/places/${encodeURIComponent(p.id)}`, body); showError(''); await loadPlaces() } catch (e) { showError(e.message) }
+}
+async function deletePlace(p) {
+  if (!confirm(`Delete the place "${p.name}"? Its stored connection details are removed.`)) return
+  try { await call('DELETE', `/v1/admin/places/${encodeURIComponent(p.id)}`); showError(''); await loadPlaces() } catch (e) { showError(e.message) }
+}
+function placeFormError(message) { const b = $('place-form-error'); b.textContent = message ?? ''; b.hidden = !message }
+function updatePlaceSave() {
+  // Saving needs a test of exactly these connection details and the host key confirmed, unless an edit leaves the connection alone.
+  const connectionTouched = !editing || $('place-url').value.trim() !== editing.config.url || $('place-key').value.trim() !== ''
+  $('place-save').disabled = connectionTouched ? !(tested && $('place-hostkey-confirm').checked) : false
+}
+function resetPlaceTest() {
+  tested = null
+  $('place-test-result').hidden = true
+  $('place-hostkey-confirm').checked = false
+  $('place-test-status').textContent = ''
+  updatePlaceSave()
+}
+function openPlaceForm(p) {
+  editing = p ?? null
+  $('place-form').hidden = false
+  $('place-form-h').textContent = p ? `Edit ${p.name}` : 'Add a place (Docker over SSH)'
+  $('place-name').value = p?.name ?? ''
+  $('place-url').value = p?.config.url ?? ''
+  $('place-key').value = ''
+  $('place-key').required = !p
+  $('place-key-help').textContent = p ? 'Leave empty to keep the stored key. Changing the address or key needs a new test.' : 'The key is stored encrypted and is never shown again.'
+  $('place-max').value = p?.max_running ?? ''
+  placeFormError('')
+  resetPlaceTest()
+  $('place-name').focus()
+}
+function closePlaceForm() { $('place-form').hidden = true; editing = null; $('place-key').value = ''; resetPlaceTest() }
+async function testPlace() {
+  placeFormError('')
+  const url = $('place-url').value.trim()
+  if (!url) return placeFormError('Enter the address, like ssh://user@host.')
+  const key = $('place-key').value
+  if (!key.trim()) return placeFormError(editing ? 'Paste the private key again to test the connection.' : 'Paste the private key.')
+  $('place-test-status').textContent = 'Testing…'
+  $('place-test').disabled = true
+  try {
+    const r = await call('POST', '/v1/admin/places/test', { kind: 'docker-ssh', config: { url }, secrets: { private_key: key } })
+    if (!r.ok) { resetPlaceTest(); $('place-test-status').textContent = ''; return placeFormError(`Could not connect: ${r.reason ?? 'unknown error'}`) }
+    if (!r.host_key) { resetPlaceTest(); return placeFormError('Connected, but the machine did not present a host key.') }
+    tested = { host_key: r.host_key }
+    $('place-hostkey').textContent = r.host_key
+    $('place-gpus').textContent = `GPUs: ${gpuText(r.gpus)}`
+    $('place-test-result').hidden = false
+    $('place-hostkey-confirm').checked = false
+    $('place-test-status').textContent = 'Connected.'
+    updatePlaceSave()
+  } catch (e) { if (e.message !== 'signed out') { resetPlaceTest(); placeFormError(e.message) } } finally { $('place-test').disabled = false }
+}
+async function savePlace(ev) {
+  ev.preventDefault()
+  placeFormError('')
+  const max = $('place-max').value.trim()
+  const body = { name: $('place-name').value.trim(), max_running: max === '' ? null : Number(max) }
+  const key = $('place-key').value
+  const url = $('place-url').value.trim()
+  if (!editing || url !== editing.config.url || key.trim() !== '') {
+    if (!tested || !$('place-hostkey-confirm').checked) return placeFormError('Test the connection and confirm the host key first.')
+    body.config = { url }
+    body.secrets = { private_key: key }
+    body.host_key = tested.host_key
+  }
+  try {
+    if (editing) await call('PUT', `/v1/admin/places/${encodeURIComponent(editing.id)}`, body)
+    else await call('POST', '/v1/admin/places', { ...body, kind: 'docker-ssh' })
+    closePlaceForm()
+    await loadPlaces()
+  } catch (e) { if (e.message !== 'signed out') placeFormError(e.code === 'place_host_key_changed' ? HOST_KEY_CHANGED : e.message) }
+}
+
 // ---------- limits ----------
 async function loadLimits() {
   current = await call('GET', '/v1/admin/limits')
@@ -337,7 +491,7 @@ function flash(text, bad = false) { const s = $('limits-status'); s.textContent 
 
 // ---------- session ----------
 async function refresh() {
-  try { await Promise.all([loadOverview(), loadSandboxes()]); showError('') } catch (e) { if (e.message !== 'signed out') showError(e.message) }
+  try { await Promise.all([loadOverview(), loadSandboxes(), loadPlaces()]); showError('') } catch (e) { if (e.message !== 'signed out') showError(e.message) }
 }
 async function start() {
   $('signin').hidden = true
@@ -362,6 +516,12 @@ $('signin-form').addEventListener('submit', (ev) => { ev.preventDefault(); store
 $('signout').addEventListener('click', () => signOut())
 $('filter').addEventListener('input', renderSandboxes)
 $('state-filter').addEventListener('change', renderSandboxes)
+$('add-place').addEventListener('click', () => openPlaceForm(null))
+$('place-cancel').addEventListener('click', closePlaceForm)
+$('place-test').addEventListener('click', () => void testPlace())
+$('place-form').addEventListener('submit', (ev) => void savePlace(ev))
+$('place-hostkey-confirm').addEventListener('change', updatePlaceSave)
+for (const id of ['place-url', 'place-key']) $(id).addEventListener('input', resetPlaceTest)
 $('add-owner').addEventListener('click', () => { $('no-owners')?.remove(); $('owner-rows').append(ownerRow()) })
 $('save-limits').addEventListener('click', () => void saveLimits())
 $('reset-limits').addEventListener('click', () => void resetLimits())

@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createSandboxService, validateLimits } from '../src/sandboxes.ts'
+import { readFileSync } from 'node:fs'
 import { createFakeDriver } from '../src/places/drivers/fake.ts'
 import { startTestService, type TestService } from '../src/testing.ts'
 
@@ -123,5 +124,12 @@ describe('admin places', () => {
     const r = await admin(svc, '/v1/admin/places/local', { method: 'DELETE' })
     expect(r.status).toBe(400)
     expect(((await r.json()) as { error: { code: string } }).error.code).toBe('invalid_request')
+  })
+
+  it('admin page has a Places section and an add-place form with a host key confirmation step', async () => {
+    svc = await startTestService(ADMIN)
+    const html = await (await fetch(`${svc.url}/admin`)).text()
+    for (const id of ['id="places"', 'id="place-form"', 'id="place-hostkey-confirm"']) expect(html).toContain(id)
+    expect(readFileSync(new URL('../src/admin/index.html', import.meta.url), 'utf8')).toContain('Docker over SSH')
   })
 })
