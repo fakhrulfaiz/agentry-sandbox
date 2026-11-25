@@ -125,6 +125,24 @@ describe('ssh-machine driver', () => {
     expect(fs.existsSync(ws('a'))).toBe(true)
   })
 
+  it('adopts an empty existing workspace, refuses a non-empty one', async () => {
+    const { machine, driver, ws } = await setup()
+    fs.mkdirSync(ws('e'), { recursive: true })
+    const h = await driver.create('sbx_e', 'o', { workspacePath: ws('e') }, { gpuIds: [] })
+    expect(h.workspace).toBe(ws('e'))
+    expect(fs.readFileSync(`${ws('e')}/.agentry-sandbox`, 'utf8').trim()).toBe('sbx_e')
+    fs.mkdirSync(ws('n'), { recursive: true })
+    fs.writeFileSync(`${ws('n')}/precious`, 'x')
+    await expect(driver.create('sbx_n', 'o', { workspacePath: ws('n') }, { gpuIds: [] })).rejects.toThrow(/already exists/u)
+    fs.writeFileSync(ws('f'), 'x')
+    await expect(driver.create('sbx_f', 'o', { workspacePath: ws('f') }, { gpuIds: [] })).rejects.toThrow(/already exists/u)
+    fs.mkdirSync(`${machine.home}/target`)
+    fs.symlinkSync(`${machine.home}/target`, ws('l'))
+    await expect(driver.create('sbx_l', 'o', { workspacePath: ws('l') }, { gpuIds: [] })).rejects.toThrow(/already exists/u)
+    expect(fs.existsSync(`${ws('n')}/precious`)).toBe(true)
+    expect(fs.readdirSync(`${machine.home}/target`)).toEqual([])
+  })
+
   it('destroy removes only the recorded workspace and the sandbox dir', async () => {
     const { machine, driver, ws } = await setup()
     const a = await driver.create('sbx_a', 'o', { workspacePath: ws('a') }, { gpuIds: [] })

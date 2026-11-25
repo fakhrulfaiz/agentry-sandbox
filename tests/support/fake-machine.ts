@@ -267,6 +267,7 @@ export async function startMachine(opts: { host?: string } = {}): Promise<Machin
         return { code, out }
       }
       case 'test':
+        if (a[0] === '-L') return fs.lstatSync(a[1]!, { throwIfNoEntry: false })?.isSymbolicLink() ? ok() : fail()
         return (a[0] === '-d' ? fs.existsSync(a[1]!) && fs.statSync(a[1]!).isDirectory() : fs.existsSync(a[1]!)) ? ok() : fail()
       case 'tail':
         return fs.existsSync(a[a.length - 1]!) ? ok(fs.readFileSync(a[a.length - 1]!, 'utf8')) : fail()

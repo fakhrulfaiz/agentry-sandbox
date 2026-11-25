@@ -431,7 +431,13 @@ export function createSshMachineDriver(
             const clash = metas.find((m) => m.id !== id && posix.normalize(m.workspace) === workspace)
             if (clash) throw new Error(`the workspace ${workspace} is already used by sandbox ${clash.id} on ${target.host}; give this sandbox its own workspace_path`)
             // Only a directory this driver makes is ever chowned or deleted.
-            if ((await shell.exec(`test -e ${sq(workspace)}`)).code === 0) throw new Error(`the workspace ${workspace} already exists on ${target.host}; give this sandbox a workspace_path that does not exist yet`)
+            // The exception: an empty real directory (the API makes one before calling) is adopted.
+            if ((await shell.exec(`test -e ${sq(workspace)}`)).code === 0 || (await shell.exec(`test -L ${sq(workspace)}`)).code === 0) {
+              const isLink = (await shell.exec(`test -L ${sq(workspace)}`)).code === 0
+              const isDir = (await shell.exec(`test -d ${sq(workspace)}`)).code === 0
+              const entries = isDir && !isLink ? await shell.exec(`sudo -n ls -A -- ${sq(workspace)}`) : undefined
+              if (!entries || entries.code !== 0 || entries.stdout.trim() !== '') throw new Error(`the workspace ${workspace} already exists on ${target.host}; give this sandbox a workspace_path that does not exist yet`)
+            }
             const p = await freePort(d, id)
             await must(`mkdir -p -- ${sq(sbDir(d, id))}`, 'creating the sandbox directory')
             await writeMeta(d, { id, owner, workspace, port: p })
