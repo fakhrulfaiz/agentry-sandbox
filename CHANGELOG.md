@@ -4,6 +4,12 @@
 
 
 
+## 2026-11-25 — E2B places
+
+- A new place kind, `e2b` ("E2B (hosted)"): sandboxes run on E2B's hosted sandboxes through its REST API, with envd reached at E2B's shared sandbox host (sandbox id, port and the sandbox's access token sent as headers). Creates use auto-pause, so E2B's timeout pauses a sandbox instead of killing it and the next request resumes it; the service extends the timeout of sandboxes in use. The admin page offers it (API key, template, timeout; nothing to confirm). README "E2B places" has what it needs and its limits.
+- A driver can keep a per-sandbox credential in its handle under a `secret.` key; the service stores it sealed in the sandbox's `handleSecrets`, apart from the handle, and hands it back on every driver call. A place kind can explain a refused template field (E2B: "E2B uses templates; set the place's template").
+- Tests: the https relay test makes its throwaway certificate with `openssl` at run time (skipped when `openssl` is missing), so no private key is committed.
+
 ## 2026-11-25 — SSH machine places
 
 - A new place kind, `ssh-machine` ("Machine over SSH"): sandboxes run directly on a Linux machine over SSH (no Docker, no isolation, the SSH user's passwordless sudo) with a loopback-only firewall rule per sandbox; the admin page offers it next to Docker over SSH, with a warning. It cannot reset a sandbox. README "SSH machine places" lists the requirements and what is written on the machine.

@@ -60,6 +60,16 @@ A place of kind "Machine over SSH" (added on the admin page like a Docker-over-S
 - A place of this kind cannot reset a sandbox. GPUs are shared (`CUDA_VISIBLE_DEVICES` narrows what a sandbox sees).
 - **Real-machine check (not covered by the tests):** sudo relaying signals, `use_pty`/`requiretty` in sudoers, `pkill`/`pgrep` availability, `ss` output and iptables-nft behaviour.
 
+## E2B places
+
+A place of kind "E2B (hosted)" runs sandboxes on [E2B](https://e2b.dev)'s hosted sandboxes instead of a machine you run. Add it on the admin page with an E2B API key and a template (an E2B template id or name, default `base`; E2B uses templates, so a sandbox template's `image` is refused). The key is stored encrypted and never returned.
+
+- **Pause, not kill:** sandboxes are created with auto-pause. When E2B's timeout (`timeout_s`, default 3600) runs out the sandbox is paused with its files and memory kept, and the next request resumes it. While a sandbox is in use the service keeps pushing the timeout out. Stop pauses, start resumes, delete kills.
+- **Reach:** envd is reached through E2B's shared sandbox host (`https://sandbox.e2b.app`) with the sandbox id and E2B's per-sandbox access token as headers. The token is kept sealed apart from the sandbox record and is never returned to a client.
+- **Limits are E2B's:** for example 10 running sandboxes on the Hobby plan; set the place's "most sandboxes running at once" to mirror them. A 429 from E2B surfaces as an error with its `Retry-After`; nothing retries in a loop.
+- **Not available:** GPUs and CPU/memory settings (they come from the E2B template), and no host key to confirm. The shared setup copies DSH's runtime through envd, so the template must be Debian-like with glibc on amd64 (E2B's default is).
+- `config`: `template`, optional `timeout_s`, `api_url`, `sandbox_host`; secret `api_key`.
+
 ## Third-party
 
 `envd` and its API spec (`third_party/envd/`) come from [e2b-dev/runtime](https://github.com/e2b-dev/runtime) under the Apache License 2.0, unmodified; see `third_party/envd/LICENSE` and `NOTICE.md`.

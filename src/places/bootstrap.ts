@@ -69,7 +69,7 @@ async function waitHealthy(driver: Driver, handle: Handle, timeoutMs: number): P
     try {
       const ep = await driver.envdEndpoint(handle)
       try {
-        if (await createEnvdClient({ baseUrl: ep.baseUrl, accessToken: '' }).health(AbortSignal.timeout(2_000))) return
+        if (await createEnvdClient({ baseUrl: ep.baseUrl, accessToken: '', ...(ep.headers ? { headers: ep.headers } : {}) }).health(AbortSignal.timeout(2_000))) return
         last = 'health check failed'
       } finally {
         ep.release?.()
@@ -92,7 +92,7 @@ export async function bootstrap(driver: Driver, id: string, handle: Handle, spec
   const ep = await driver.envdEndpoint(handle)
   try {
     const accessToken = ep.token ?? envdToken(opts.secret, id)
-    const envd = createEnvdClient({ baseUrl: ep.baseUrl, accessToken })
+    const envd = createEnvdClient({ baseUrl: ep.baseUrl, accessToken, ...(ep.headers ? { headers: ep.headers } : {}) })
     const agent = driver.agentUser ?? AGENT
     const envVars = { ...driver.envdEnv?.(handle), ...spec.env }
     const base = { accessToken, defaultWorkdir: workspaceOf(spec), ...(Object.keys(envVars).length > 0 ? { envVars } : {}) }

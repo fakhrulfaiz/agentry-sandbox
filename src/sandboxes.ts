@@ -13,6 +13,7 @@
  */
 import { randomBytes } from 'node:crypto'
 import type { Limits, SandboxConfig } from './config.ts'
+import { openSecrets, sealSecrets } from './crypto/secrets.ts'
 import { envdToken } from './envd/token.ts'
 import { bootstrap } from './places/bootstrap.ts'
 import { assignGpus } from './places/gpus.ts'
@@ -93,7 +94,7 @@ export interface SandboxService {
   destroy(owner: string, id: string, opts?: { force?: boolean }): Promise<void>
   touch(owner: string, id: string): Promise<void>
   /** Where to reach the sandbox's envd, and its access token; starts a stopped sandbox. */
-  endpoint(owner: string, id: string): Promise<{ baseUrl: string; token: string; release?: () => void; /** Maps the requested envd user (SSH machine: `agent` is the login user). */ envdUser?: (requested: string) => string }>
+  endpoint(owner: string, id: string): Promise<{ baseUrl: string; token: string; headers?: Record<string, string>; release?: () => void; /** Maps the requested envd user (SSH machine: `agent` is the login user). */ envdUser?: (requested: string) => string }>
   /** Marks a connection to the sandbox as open; the idle sweep skips it until the returned function is called. */
   beginUse(id: string): () => void
   sweepIdle(): Promise<string[]>
@@ -247,7 +248,28 @@ export function createSandboxService(deps: {
     return r
   }
 
+  /**
+   * A driver keeps a per-sandbox secret (E2B's envd access token) in its handle under a `secret.` key.
+   * Saving moves those keys, sealed, into `handleSecrets`; `dh(r)` puts them back for the driver. A save
+   * whose handle carries none leaves the stored secrets alone.
+   */
+  const SECRET_PREFIX = 'secret.'
+  const dh = (r: SandboxRecord): Handle => {
+    if (!r.handleSecrets) return r.handle
+    const opened = openSecrets(config.secret, r.handleSecrets)
+    return { ...r.handle, ...Object.fromEntries(Object.entries(opened).map(([k, v]) => [SECRET_PREFIX + k, v])) }
+  }
+
   async function save(r: SandboxRecord, patch: Parameters<Store['sandboxes']['update']>[2]): Promise<SandboxRecord> {
+    if (patch.handle && Object.keys(patch.handle).some((k) => k.startsWith(SECRET_PREFIX))) {
+      const secrets: Record<string, string> = {}
+      const rest: Handle = {}
+      for (const [k, v] of Object.entries(patch.handle)) {
+        if (k.startsWith(SECRET_PREFIX)) secrets[k.slice(SECRET_PREFIX.length)] = v
+        else rest[k] = v
+      }
+      patch = { ...patch, handle: rest, handleSecrets: sealSecrets(config.secret, { ...(r.handleSecrets ? openSecrets(config.secret, r.handleSecrets) : {}), ...secrets }) }
+    }
     const u = await store.sandboxes.update(r.id, r.owner, patch)
     if (!u) throw new NotFoundError('sandbox')
     return u
@@ -314,14 +336,14 @@ export function createSandboxService(deps: {
     const r = await load(owner, id)
     if (r.state === 'deleting') throw new NotFoundError('sandbox')
     const place = placeOf(r)
-    if (r.state === 'running' && (await call(place, () => place.driver.status(r.handle))) === 'running') return r
+    if (r.state === 'running' && (await call(place, () => place.driver.status(dh(r)))) === 'running') return r
     await mustAvailable(place)
     await checkRunning(owner, place, id)
     if (noMachine(r.handle)) return build(await save(r, { state: 'provisioning', error: null }))
     let reserved: { record: SandboxRecord; gpuIds: string[] } | undefined
     try {
       reserved = await reserveGpus(place, r)
-      const started = await call(place, () => place.driver.start(r.id, r.handle, r.template, { gpuIds: reserved!.gpuIds }))
+      const started = await call(place, () => place.driver.start(r.id, dh(r), r.template, { gpuIds: reserved!.gpuIds }))
       let handle: Handle
       try {
         handle = await call(place, () => provision(place.driver, r.id, started, r.template))
@@ -362,7 +384,7 @@ export function createSandboxService(deps: {
         if (!inUse.has(r.id) && last <= now() - config.idleStopMinutes * 60_000) {
           try {
             const place = placeOf(r)
-            await call(place, () => place.driver.stop(r.handle))
+            await call(place, () => place.driver.stop(dh(r)))
             await save(r, { state: 'stopped', handle: withoutGpus(r.handle) })
             stopped.push(r.id)
           } catch {
@@ -372,7 +394,7 @@ export function createSandboxService(deps: {
         }
         // Still running: keep its network rules in place (a host firewall reload drops them).
         const place = places.get(r.backend)
-        if (place?.driver.maintain) await place.driver.maintain(r.id, r.handle, r.template).catch(() => {})
+        if (place?.driver.maintain) await place.driver.maintain(r.id, dh(r), r.template).catch(() => {})
       })
     }
     return stopped
@@ -397,7 +419,7 @@ export function createSandboxService(deps: {
       for (const field of Object.keys(template) as (keyof TemplateSpec)[]) {
         if (template[field] === undefined || field === 'place' || field === 'workspacePath') continue
         if (field === 'gpus') continue
-        if (!allowed.includes(field)) throw new LimitError(`place '${place.name}' does not support '${field}'`)
+        if (!allowed.includes(field)) throw new LimitError(`place '${place.name}' does not support '${field}'${place.driver.fieldHints?.[field] ? `: ${place.driver.fieldHints[field]}` : ''}`)
       }
       checkResources(template)
       await mustAvailable(place)
@@ -445,7 +467,7 @@ export function createSandboxService(deps: {
         const r = await load(owner, id)
         if (!noMachine(r.handle)) {
           const place = placeOf(r)
-          await call(place, () => place.driver.stop(r.handle))
+          await call(place, () => place.driver.stop(dh(r)))
         }
         return save(r, { state: 'stopped', handle: withoutGpus(r.handle) })
       })
@@ -459,7 +481,7 @@ export function createSandboxService(deps: {
         await mustAvailable(place)
         await checkRunning(owner, place, id)
         checkRate(owner)
-        await call(place, () => place.driver.destroy(r.id, r.handle, { keepWorkspace }))
+        await call(place, () => place.driver.destroy(r.id, dh(r), { keepWorkspace }))
         return build(await save(r, { state: 'provisioning', handle: {}, error: null }))
       })
     },
@@ -475,7 +497,7 @@ export function createSandboxService(deps: {
           return undefined
         }
         try {
-          await call(place, () => place.driver.destroy(r.id, r.handle, { keepWorkspace: false }))
+          await call(place, () => place.driver.destroy(r.id, dh(r), { keepWorkspace: false }))
         } catch (e) {
           if (!opts.force) throw e
           forgotten(r, message(e))
@@ -495,8 +517,8 @@ export function createSandboxService(deps: {
     async endpoint(owner, id) {
       const r = await locked(id, () => doStart(owner, id))
       const place = placeOf(r)
-      const { baseUrl, token, release } = await call(place, () => place.driver.envdEndpoint(r.handle))
-      return { baseUrl, token: token ?? envdToken(config.secret, r.id), ...(release ? { release } : {}), ...(place.driver.envdUser ? { envdUser: place.driver.envdUser.bind(place.driver) } : {}) }
+      const { baseUrl, token, headers, release } = await call(place, () => place.driver.envdEndpoint(dh(r)))
+      return { baseUrl, token: token ?? envdToken(config.secret, r.id), ...(headers ? { headers } : {}), ...(release ? { release } : {}), ...(place.driver.envdUser ? { envdUser: place.driver.envdUser.bind(place.driver) } : {}) }
     },
 
     beginUse(id) {

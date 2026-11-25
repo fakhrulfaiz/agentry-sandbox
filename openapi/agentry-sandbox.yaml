@@ -212,7 +212,7 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
     post:
       summary: Admin. Add a place
-      description: "`host_key` is the fingerprint a successful test returned; it is pinned."
+      description: "`host_key` is the fingerprint a successful test returned; it is pinned (SSH kinds only; an `e2b` place needs none)."
       security: [{ bearer: [] }]
       requestBody:
         required: true
@@ -223,7 +223,7 @@ paths:
               required: [name, kind, config]
               properties:
                 name: { type: string }
-                kind: { enum: [docker-ssh, ssh-machine] }
+                kind: { enum: [docker-ssh, ssh-machine, e2b] }
                 config: { type: object }
                 secrets: { type: object, additionalProperties: { type: string }, description: Sealed at rest and never returned. }
                 host_key: { type: string, pattern: "^SHA256:" }
@@ -392,11 +392,11 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
-        kind: { enum: [docker, docker-ssh, ssh-machine] }
+        kind: { enum: [docker, docker-ssh, ssh-machine, e2b] }
         enabled: { type: boolean }
         default: { type: boolean }
         max_running: { type: [integer, "null"] }
-        config: { type: object, description: "Connection settings (for docker-ssh and ssh-machine: `url` and the pinned `host_key`)." }
+        config: { type: object, description: "Connection settings (for docker-ssh and ssh-machine: `url` and the pinned `host_key`; for e2b: `template`, optional `api_url`, `sandbox_host`, `timeout_s`; the E2B API key is a secret `api_key`)." }
         has_secrets: { type: boolean }
         available: { type: boolean }
         reason: { type: string }

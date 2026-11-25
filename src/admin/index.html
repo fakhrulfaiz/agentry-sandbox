@@ -164,14 +164,23 @@ textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; 
       <select id="place-kind">
         <option value="docker-ssh">Docker over SSH</option>
         <option value="ssh-machine">Machine over SSH</option>
+        <option value="e2b">E2B (hosted)</option>
       </select>
       <div class="banner bad" id="place-kind-warning" role="note" hidden>Agents work directly on this machine as the SSH user, with its sudo. No isolation between sandboxes. Requires passwordless sudo and iptables.</div>
       <label for="place-name">Name</label>
       <input id="place-name" type="text" required maxlength="200" placeholder="GPU box">
-      <label for="place-url">Address</label>
+      <label for="place-url" id="place-url-label">Address</label>
       <input id="place-url" type="text" required placeholder="ssh://user@host:22" spellcheck="false">
-      <label for="place-key">Private key</label>
-      <textarea id="place-key" rows="5" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+      <div id="place-e2b-fields" hidden>
+        <label for="place-template">Template</label>
+        <input id="place-template" type="text" placeholder="base" spellcheck="false">
+        <div class="help">The E2B template sandboxes are created from (an id or name). E2B uses templates instead of images.</div>
+        <label for="place-timeout">Pause after idle seconds (E2B timeout)</label>
+        <input id="place-timeout" type="number" min="60" max="86400" step="1" placeholder="3600">
+        <div class="help">When this runs out E2B pauses the sandbox (nothing is lost) and it resumes on the next request.</div>
+      </div>
+      <label for="place-key" id="place-key-label">Private key</label>
+      <textarea id="place-key" rows="5" spellcheck="false" placeholder="Paste the private key"></textarea>
       <div class="help" id="place-key-help">The key is stored encrypted and is never shown again.</div>
       <label for="place-max">Most sandboxes running at once (optional)</label>
       <input id="place-max" type="number" min="0" step="1" placeholder="No limit">
@@ -337,7 +346,7 @@ async function remove(s) {
 }
 
 // ---------- places ----------
-const KIND_WORDS = { docker: 'Docker (this machine)', 'docker-ssh': 'Docker over SSH', 'ssh-machine': 'Machine over SSH' }
+const KIND_WORDS = { docker: 'Docker (this machine)', 'docker-ssh': 'Docker over SSH', 'ssh-machine': 'Machine over SSH', e2b: 'E2B (hosted)' }
 const HOST_KEY_CHANGED = 'Host key changed — test and confirm the new key'
 let placeList = []
 let editing = null // place being edited, or null when adding
@@ -375,12 +384,33 @@ async function deletePlace(p) {
   try { await call('DELETE', `/v1/admin/places/${encodeURIComponent(p.id)}`); showError(''); await loadPlaces() } catch (e) { showError(e.message) }
 }
 function placeKind() { return $('place-kind').value }
-function showKindWarning() { $('place-kind-warning').hidden = placeKind() !== 'ssh-machine' }
+function showKindWarning() {
+  $('place-kind-warning').hidden = placeKind() !== 'ssh-machine'
+  const e2b = placeKind() === 'e2b'
+  $('place-url').hidden = e2b
+  $('place-url').required = !e2b
+  $('place-url-label').hidden = e2b
+  $('place-e2b-fields').hidden = !e2b
+  $('place-key-label').textContent = e2b ? 'E2B API key' : 'Private key'
+  $('place-key').placeholder = e2b ? 'e2b_...' : 'Paste the private key'
+  $('place-key').rows = e2b ? 1 : 5
+}
 function placeFormError(message) { const b = $('place-form-error'); b.textContent = message ?? ''; b.hidden = !message }
+function e2bConfig() {
+  const timeout = $('place-timeout').value.trim()
+  return { template: $('place-template').value.trim() || 'base', ...(timeout === '' ? {} : { timeout_s: Number(timeout) }) }
+}
+function connectionTouched() {
+  if (!editing) return true
+  if (placeKind() === 'e2b') {
+    return $('place-key').value.trim() !== ''
+  }
+  return $('place-url').value.trim() !== editing.config.url || $('place-key').value.trim() !== ''
+}
 function updatePlaceSave() {
-  // Saving needs a test of exactly these connection details and the host key confirmed, unless an edit leaves the connection alone.
-  const connectionTouched = !editing || $('place-url').value.trim() !== editing.config.url || $('place-key').value.trim() !== ''
-  $('place-save').disabled = connectionTouched ? !(tested && $('place-hostkey-confirm').checked) : false
+  // Saving needs a test of exactly these connection details and (for SSH) the host key confirmed, unless an edit leaves the connection alone.
+  const confirmed = placeKind() === 'e2b' ? !!tested : tested && $('place-hostkey-confirm').checked
+  $('place-save').disabled = connectionTouched() ? !confirmed : false
 }
 function resetPlaceTest() {
   tested = null
@@ -398,9 +428,11 @@ function openPlaceForm(p) {
   showKindWarning()
   $('place-name').value = p?.name ?? ''
   $('place-url').value = p?.config.url ?? ''
+  $('place-template').value = p?.config.template ?? ''
+  $('place-timeout').value = p?.config.timeout_s ?? ''
   $('place-key').value = ''
   $('place-key').required = !p
-  $('place-key-help').textContent = p ? 'Leave empty to keep the stored key. Changing the address or key needs a new test.' : 'The key is stored encrypted and is never shown again.'
+  $('place-key-help').textContent = p ? 'Leave empty to keep the stored key. Changing the connection needs a new test.' : 'The key is stored encrypted and is never shown again.'
   $('place-max').value = p?.max_running ?? ''
   placeFormError('')
   resetPlaceTest()
@@ -409,15 +441,17 @@ function openPlaceForm(p) {
 function closePlaceForm() { $('place-form').hidden = true; editing = null; $('place-key').value = ''; resetPlaceTest() }
 async function testPlace() {
   placeFormError('')
+  const e2b = placeKind() === 'e2b'
   const url = $('place-url').value.trim()
-  if (!url) return placeFormError('Enter the address, like ssh://user@host.')
+  if (!e2b && !url) return placeFormError('Enter the address, like ssh://user@host.')
   const key = $('place-key').value
-  if (!key.trim()) return placeFormError(editing ? 'Paste the private key again to test the connection.' : 'Paste the private key.')
+  if (!key.trim()) return placeFormError(e2b ? 'Paste the E2B API key.' : editing ? 'Paste the private key again to test the connection.' : 'Paste the private key.')
   $('place-test-status').textContent = 'Testing…'
   $('place-test').disabled = true
   try {
-    const r = await call('POST', '/v1/admin/places/test', { kind: placeKind(), config: { url }, secrets: { private_key: key } })
+    const r = await call('POST', '/v1/admin/places/test', e2b ? { kind: 'e2b', config: e2bConfig(), secrets: { api_key: key } } : { kind: placeKind(), config: { url }, secrets: { private_key: key } })
     if (!r.ok) { resetPlaceTest(); $('place-test-status').textContent = ''; return placeFormError(`Could not connect: ${r.reason ?? 'unknown error'}`) }
+    if (e2b) { tested = { host_key: null }; $('place-test-status').textContent = 'E2B accepted the key.'; updatePlaceSave(); return }
     if (!r.host_key) { resetPlaceTest(); return placeFormError('Connected, but the machine did not present a host key.') }
     tested = { host_key: r.host_key }
     $('place-hostkey').textContent = r.host_key
@@ -435,7 +469,11 @@ async function savePlace(ev) {
   const body = { name: $('place-name').value.trim(), max_running: max === '' ? null : Number(max) }
   const key = $('place-key').value
   const url = $('place-url').value.trim()
-  if (!editing || url !== editing.config.url || key.trim() !== '') {
+  if (placeKind() === 'e2b') {
+    if (connectionTouched() && !tested) return placeFormError('Test the connection first.')
+    body.config = e2bConfig()
+    if (key.trim() !== '') body.secrets = { api_key: key }
+  } else if (connectionTouched()) {
     if (!tested || !$('place-hostkey-confirm').checked) return placeFormError('Test the connection and confirm the host key first.')
     body.config = { url }
     body.secrets = { private_key: key }
@@ -540,7 +578,7 @@ $('place-cancel').addEventListener('click', closePlaceForm)
 $('place-test').addEventListener('click', () => void testPlace())
 $('place-form').addEventListener('submit', (ev) => void savePlace(ev))
 $('place-hostkey-confirm').addEventListener('change', updatePlaceSave)
-for (const id of ['place-url', 'place-key']) $(id).addEventListener('input', resetPlaceTest)
+for (const id of ['place-url', 'place-key', 'place-template', 'place-timeout']) $(id).addEventListener('input', resetPlaceTest)
 $('place-kind').addEventListener('change', () => { showKindWarning(); resetPlaceTest() })
 $('add-owner').addEventListener('click', () => { $('no-owners')?.remove(); $('owner-rows').append(ownerRow()) })
 $('save-limits').addEventListener('click', () => void saveLimits())

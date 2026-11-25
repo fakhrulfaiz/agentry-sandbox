@@ -5,6 +5,10 @@
  */
 import type { GpuInfo, TemplateSpec } from '../store/types.ts'
 
+/**
+ * A driver's record of one machine. Keys starting with `secret.` hold credentials (E2B's envd token): the
+ * service keeps them sealed apart from the handle and gives them back to the driver on every call.
+ */
 export type Handle = Record<string, string>
 
 export interface Capabilities {
@@ -47,6 +51,8 @@ export interface Driver {
   envdUser?(requested: string): string
   /** Extra environment for envd's `/init` (SSH machine: `CUDA_VISIBLE_DEVICES` from `handle.gpuIds`). */
   envdEnv?(handle: Handle): Record<string, string>
+  /** Why a template field is not supported here (appended to the 400 naming it). */
+  fieldHints?: Partial<Record<keyof TemplateSpec, string>>
   /** Cheap reachability check (no image pulls, no containers). `gpus` are those already discovered. */
   probe(): Promise<Availability & { gpus?: GpuInfo[] }>
   /** Looks for GPUs (may run a container and pull an image), remembers and returns them. Run when a place is added, not per request. */
@@ -64,7 +70,7 @@ export interface Driver {
   destroy(id: string, handle: Handle, opts: { keepWorkspace: boolean }): Promise<void>
   status(handle: Handle): Promise<'running' | 'stopped' | 'missing'>
   /** Where envd answers for a running sandbox. */
-  envdEndpoint(handle: Handle): Promise<{ baseUrl: string; token?: string; release?: () => void }>
+  envdEndpoint(handle: Handle): Promise<{ baseUrl: string; token?: string; /** Extra headers sent upstream on every envd request (never returned to clients). */ headers?: Record<string, string>; release?: () => void }>
   /** Every sandbox this driver manages, from its own labels (for reconciliation). */
   listManaged(): Promise<{ id: string; owner: string; handle: Handle }[]>
   /** Periodic upkeep of a running sandbox (Docker: re-apply its network rules). */
