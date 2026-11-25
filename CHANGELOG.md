@@ -7,9 +7,9 @@
 ## 2026-11-25 — places
 
 - Places: one service can run sandboxes on several places. A place is a Docker host (local, remote over SSH with a pinned host key) with its connection secrets stored encrypted; each sandbox runs on its place. Docker and bootstrap code is shared through a driver and one bootstrap routine.
-- Admin page: a Places section to add, edit, test and remove places; `/v1/places` and admin places endpoints.
-- GPUs on Docker places are assigned exclusively: a sandbox holds its GPUs until it is deleted.
-- Images are now `ghcr.io/fakhrulfaiz/agentry-{envd,dsh-runtime,sandbox,netguard}`, published multi-arch (amd64, arm64) by GitHub Actions on `main`; the envd and sandbox Dockerfiles follow `TARGETARCH`. Remote Docker places pull these images. CI runs typecheck and tests (with Postgres) on `develop` and pull requests to `main`.
+- Admin page: a Places section to add, edit, test and remove places, with admin places endpoints (`/v1/admin/places`). A remote place needs a confirmed host key to be saved.
+- GPUs on Docker places are assigned exclusively: a sandbox holds its GPUs until it stops, and a restart prefers the GPUs it had (a recreated container redoes only the agent user and packages, never template files or setup commands). GPUs are looked for when a place is added (and once at startup for the local one), not on every request.
+- Images are now `ghcr.io/fakhrulfaiz/agentry-{envd,dsh-runtime,sandbox,netguard}`, published multi-arch (amd64, arm64) by GitHub Actions on `main`; the envd and sandbox Dockerfiles follow `TARGETARCH`. Every Docker place pulls the envd, egress-guard, DSH-runtime and sandbox images on its own daemon when it lacks them, and reads envd and the DSH runtime through that daemon (its own architecture). Upgrade note: the images were renamed from `agentry/*`; an install that built them locally keeps working (the old tag is re-tagged when the pull fails), otherwise run `pnpm images:build` or wait until `images.yml` has published the public GHCR packages. Place reachability is cached for 30 s and cut off after 5 s; the idle sweep and reconciliation skip a place that does not answer. A changed host key answers 409 `place_host_key_changed` on create, start and reset. `DELETE /v1/admin/sandboxes/{id}?force=true` forgets a sandbox whose place cannot be reached (the admin page offers it), and deleting a sandbox whose place was removed forgets the record. CI runs typecheck and tests (with Postgres) on `develop` and pull requests to `main`.
 
 ## 2026-11-25 — failed creates leave nothing behind
 

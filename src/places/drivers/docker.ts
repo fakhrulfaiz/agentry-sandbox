@@ -9,6 +9,7 @@ import { createEnvdClient } from '../../envd/client.ts'
 import { envdArchive, treeArchive } from '../../backends/envd-binary.ts'
 import type { GpuInfo, TemplateSpec } from '../../store/types.ts'
 import { parseNvidiaSmi } from '../gpus.ts'
+import { createEnsureImage, type EnsureImage } from '../images.ts'
 import type { Driver, Handle, ImageInfo, NetworkGuard } from '../driver.ts'
 
 const ENVD_PORT = '49983/tcp'
@@ -36,9 +37,9 @@ const isNotFound = (e: unknown) => (e as { statusCode?: number }).statusCode ===
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /** The DSH runtime tree from `config.dshRuntimeImage` as a tar, for the bootstrap to copy through envd (null when disabled). */
-export function dockerDshRuntime(config: SandboxConfig, client: Docker = dockerClient(config)): (() => Promise<Buffer>) | null {
+export function dockerDshRuntime(config: SandboxConfig, client: Docker = dockerClient(config), ensure?: EnsureImage): (() => Promise<Buffer>) | null {
   const image = config.dshRuntimeImage
-  return image ? () => treeArchive(client, image, '/opt/agentry/dsh') : null
+  return image ? () => treeArchive(client, image, '/opt/agentry/dsh', ensure) : null
 }
 
 /** Variations on the Docker driver: another kind name, another way to reach the published envd port (SSH tunnel). */
@@ -46,28 +47,21 @@ export interface DockerDriverOptions {
   kind?: string
   /** Where envd answers given the container's published `127.0.0.1` port; default is that port directly. */
   reach?: (hostPort: number) => Promise<{ baseUrl: string; release?: () => void }>
+  /** Makes an image present on this driver's daemon; default pulls through `puller`. Share it with the egress guard. */
+  ensure?: EnsureImage
+  /** Whether `discoverGpus` may run a container (false over a connection whose host key is not confirmed). */
+  discovery?: boolean
 }
 
 export function createDockerDriver(config: SandboxConfig, network: NetworkGuard, client: Docker = dockerClient(config), puller: Docker = dockerClient(config, undefined), options: DockerDriverOptions = {}): Driver {
 
-  async function ensureImage(image: string): Promise<void> {
-    try {
-      await client.getImage(image).inspect()
-      return
-    } catch (e) {
-      if (!isNotFound(e)) throw e
-    }
-    // Pull without any credential helper (public images; a configured registry login would go in authconfig).
-    const stream = await puller.pull(image, {})
-    await new Promise<void>((resolve, reject) => puller.modem.followProgress(stream, (err) => (err ? reject(err) : resolve())))
-  }
+  const ensureImage = options.ensure ?? createEnsureImage(client, puller)
 
-  /** The GPUs of this host (cached once found: they rarely change, and a probe runs a container). */
+  /** The GPUs found by `discoverGpus` (remembered, even when there are none: a probe runs a container). */
   let gpuCache: GpuInfo[] = []
-  async function listGpus(): Promise<GpuInfo[]> {
-    if (gpuCache.length > 0) return gpuCache
+  async function discoverGpus(): Promise<GpuInfo[]> {
     const info = await client.info()
-    if (!Object.keys((info as { Runtimes?: Record<string, unknown> }).Runtimes ?? {}).includes('nvidia')) return []
+    if (!Object.keys((info as { Runtimes?: Record<string, unknown> }).Runtimes ?? {}).includes('nvidia')) return (gpuCache = [])
     const image = config.defaultImage
     await ensureImage(image)
     const container = await client.createContainer({
@@ -162,7 +156,7 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
   const labels = (id: string, owner: string) => ({ 'agentry.managed': 'true', 'agentry.sandbox.id': id, 'agentry.sandbox.owner': owner })
 
   /** Creates and boots the container on `volume`. A failure removes the container (and the volume when `ownsVolume`). */
-  async function makeContainer(id: string, owner: string, spec: TemplateSpec, gpuIds: string[], volume: string, ownsVolume: boolean, provisioned = 'false'): Promise<Handle> {
+  async function makeContainer(id: string, owner: string, spec: TemplateSpec, gpuIds: string[], volume: string, ownsVolume: boolean, provisioned = 'false', recreated = false): Promise<Handle> {
     const image = spec.image ?? config.defaultImage
     await ensureImage(image)
     const net = await network.networkFor(owner)
@@ -193,8 +187,8 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
       },
     })
     try {
-      await container.putArchive(await envdArchive(client, config.envdImage), { path: '/' })
-      return await boot({ containerId: container.id, volume, network: net, provisioned }, spec)
+      await container.putArchive(await envdArchive(client, config.envdImage, ensureImage), { path: '/' })
+      return await boot({ containerId: container.id, volume, network: net, provisioned, ...(recreated ? { recreated: 'true' } : {}) }, spec)
     } catch (e) {
       // Fail closed: nothing half-made stays behind, running or not.
       await removeAll(container.id, ownsVolume ? volume : undefined).catch(() => {})
@@ -209,11 +203,22 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     async probe() {
       try {
         const v = await client.version()
-        const gpus = await listGpus().catch(() => [] as GpuInfo[])
-        return { ok: true as const, version: v.Version, gpus }
+        return { ok: true as const, version: v.Version, gpus: gpuCache }
       } catch (e) {
         return { ok: false as const, reason: `Docker is not reachable: ${(e as Error).message}` }
       }
+    },
+
+    async discoverGpus() {
+      if (options.discovery === false) return []
+      return discoverGpus().catch(() => [] as GpuInfo[])
+    },
+
+    async dshRuntime() {
+      const image = config.dshRuntimeImage
+      if (!image) return null
+      const arch = ((await client.version()) as { Arch?: string }).Arch ?? ''
+      return { arch, tar: () => treeArchive(client, image, '/opt/agentry/dsh', ensureImage) }
     },
 
     async describeImage(image) {
@@ -240,7 +245,7 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
           // Devices are fixed at container create: recreate on the same volume (the workspace survives).
           const owner = info.Config.Labels['agentry.sandbox.owner'] ?? ''
           await removeAll(handle.containerId!, undefined)
-          return await makeContainer(id, owner, spec, ctx.gpuIds, handle.volume ?? volumeName(id), false)
+          return await makeContainer(id, owner, spec, ctx.gpuIds, handle.volume ?? volumeName(id), false, 'false', true)
         }
         return await boot(handle, spec)
       } catch (e) {

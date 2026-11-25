@@ -6,8 +6,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import ssh2, { type Connection } from 'ssh2'
-import { createDockerSshDriver } from '../src/places/drivers/docker-ssh.ts'
+import { createDockerSshDriver, dockerSshFactory } from '../src/places/drivers/docker-ssh.ts'
 import { loadConfig } from '../src/config.ts'
+import { startTestService } from '../src/testing.ts'
 import { HostKeyChangedError, createTunnels, fingerprint, parseSshTarget } from '../src/places/ssh.ts'
 
 const { Server, utils } = ssh2
@@ -143,14 +144,40 @@ describe('ssh', () => {
     const target = `ssh://u@127.0.0.1:${String(server.port)}`
     const pinnedWrong = createDockerSshDriver(config, { target, privateKey: user.private, hostKey: fingerprint(blobOf(hostKeyB.public)) })
     cleanups.push(() => pinnedWrong.close?.())
-    expect(await pinnedWrong.probe()).toEqual({ ok: false, reason: 'host key changed' })
+    expect(await pinnedWrong.probe()).toEqual({ ok: false, reason: 'host key changed', hostKeyChanged: true })
     await expect(pinnedWrong.status({ containerId: 'c' })).rejects.toBeInstanceOf(HostKeyChangedError)
     expect(server.channels).toBe(0)
 
-    const unpinned = createDockerSshDriver(config, { target, privateKey: user.private })
+    const unpinned = createDockerSshDriver(config, { target, privateKey: user.private, allowUnpinnedProbe: true })
     cleanups.push(() => unpinned.close?.())
     await unpinned.probe() // the server cannot run docker; only the key it presented matters
     expect(unpinned.observedHostKey?.()).toBe(fingerprint(blobOf(hostKeyA.public)))
     await expect(unpinned.create('i', 'o', {}, { gpuIds: [] })).rejects.toThrow(/not pinned/u)
+  })
+
+  it('C1: the admin page\'s exact request body reaches the real docker-ssh driver and returns the host key', async () => {
+    const server = await startServer(hostKeyA.private)
+    cleanups.push(() => server.close())
+    const config = loadConfig({ AGENTRY_SANDBOX_DATABASE_URL: 'postgres://x@localhost/x', AGENTRY_SANDBOX_API_KEYS: `sha256:${'a'.repeat(64)}`, AGENTRY_SANDBOX_SECRET: 's'.repeat(32) })
+    const adminKey = 'admin-key-for-c1'
+    const svc = await startTestService({ AGENTRY_SANDBOX_ADMIN_KEYS: `sha256:${createHash('sha256').update(adminKey).digest('hex')}` }, undefined, { 'docker-ssh': dockerSshFactory(config) })
+    cleanups.push(() => svc.close())
+    // The body admin/index.html sends: config.url and secrets.private_key.
+    const r = await fetch(`${svc.url}/v1/admin/places/test`, { method: 'POST', headers: { authorization: `Bearer ${adminKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'docker-ssh', config: { url: `ssh://u@127.0.0.1:${String(server.port)}` }, secrets: { private_key: user.private } }) })
+    expect(r.status).toBe(200)
+    expect(((await r.json()) as { host_key?: string }).host_key).toBe(fingerprint(blobOf(hostKeyA.public)))
+    // Saving without a confirmed host key is refused.
+    const save = await fetch(`${svc.url}/v1/admin/places`, { method: 'POST', headers: { authorization: `Bearer ${adminKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Box', kind: 'docker-ssh', config: { url: `ssh://u@127.0.0.1:${String(server.port)}` }, secrets: { private_key: user.private } }) })
+    expect(save.status).toBe(400)
+  })
+
+  it('Minor 2: a stored place without a pinned key never connects', async () => {
+    const server = await startServer(hostKeyA.private)
+    cleanups.push(() => server.close())
+    const config = loadConfig({ AGENTRY_SANDBOX_DATABASE_URL: 'postgres://x@localhost/x', AGENTRY_SANDBOX_API_KEYS: `sha256:${'a'.repeat(64)}`, AGENTRY_SANDBOX_SECRET: 's'.repeat(32) })
+    const d = createDockerSshDriver(config, { target: `ssh://u@127.0.0.1:${String(server.port)}`, privateKey: user.private })
+    cleanups.push(() => d.close?.())
+    expect(await d.probe()).toEqual({ ok: false, reason: 'host key not confirmed' })
+    expect(server.connections.length).toBe(0)
   })
 })

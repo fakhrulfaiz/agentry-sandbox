@@ -16,7 +16,13 @@ const ENVD_USER = /^[a-z_][a-z0-9_-]{0,31}$/
 
 export async function relay(service: SandboxService, owner: string, id: string, rest: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const { baseUrl, token, release } = await service.endpoint(owner, id)
-  await service.touch(owner, id)
+  try {
+    await service.touch(owner, id)
+  } catch (e) {
+    // A tunnel opened for this request must not outlive it (the sandbox may have just been deleted).
+    release?.()
+    throw e
+  }
   // The client may have left while the sandbox was starting.
   if (req.destroyed || res.destroyed) {
     release?.()

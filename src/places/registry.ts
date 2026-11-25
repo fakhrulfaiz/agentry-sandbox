@@ -7,7 +7,7 @@
 import type { SandboxConfig } from '../config.ts'
 import { openSecrets } from '../crypto/secrets.ts'
 import type { GpuInfo, PlaceRecord, Store } from '../store/types.ts'
-import type { Driver } from './driver.ts'
+import type { Availability, Driver } from './driver.ts'
 
 export const LOCAL_PLACE_ID = 'local'
 
@@ -20,9 +20,14 @@ export interface Place {
   maxRunning: number | null
   driver: Driver
   gpus: GpuInfo[]
+  /** The driver's reachability, cached briefly and cut off after a few seconds, so a dead host never stalls a request or the sweep. */
+  probe(): Promise<ProbeResult>
 }
 
-export type DriverFactory = (record: PlaceRecord, secrets: Record<string, string>) => Driver
+export type ProbeResult = Availability & { gpus?: GpuInfo[] }
+
+/** `forTest`: the admin's connection test (a remote driver may then connect without a pinned host key). */
+export type DriverFactory = (record: PlaceRecord, secrets: Record<string, string>, opts?: { forTest?: boolean }) => Driver
 
 export interface PlaceRegistry {
   /** Default first, then by name. */
@@ -34,16 +39,40 @@ export interface PlaceRegistry {
   makeDriver: DriverFactory
 }
 
-export async function createPlaceRegistry(deps: { store: Store; config: SandboxConfig; local: Driver; drivers: Record<string, DriverFactory> }): Promise<PlaceRegistry> {
+export interface ProbeOptions {
+  /** How long a probe result is reused (default 0: always probe; the service sets 30 s). */
+  probeTtlMs?: number
+  /** A probe that takes longer counts as unreachable (default 5 s). */
+  probeTimeoutMs?: number
+}
+
+export async function createPlaceRegistry(deps: { store: Store; config: SandboxConfig; local: Driver; drivers: Record<string, DriverFactory> } & ProbeOptions): Promise<PlaceRegistry> {
   const { store, config, local, drivers } = deps
+  const ttl = deps.probeTtlMs ?? 0
+  const timeout = deps.probeTimeoutMs ?? 5_000
+  const probes = new WeakMap<Driver, { at: number; result: Promise<ProbeResult> }>()
+  /** One cached probe per driver (shared by every Place object made from it, so reloads keep it). */
+  const probeOf = (driver: Driver) => (): Promise<ProbeResult> => {
+    const hit = probes.get(driver)
+    if (hit && Date.now() - hit.at < ttl) return hit.result
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const result = Promise.race([
+      driver.probe().catch((e: unknown): ProbeResult => ({ ok: false, reason: e instanceof Error ? e.message : String(e) })),
+      new Promise<ProbeResult>((resolve) => {
+        timer = setTimeout(() => resolve({ ok: false, reason: `no answer within ${String(timeout)} ms` }), timeout)
+      }),
+    ]).finally(() => clearTimeout(timer))
+    if (ttl > 0) probes.set(driver, { at: Date.now(), result })
+    return result
+  }
   let places = new Map<string, Place>()
   /** Live drivers by place id, with the record version they were built from. */
   const built = new Map<string, { stamp: string; driver: Driver }>()
 
-  const makeDriver: DriverFactory = (record, secrets) => {
+  const makeDriver: DriverFactory = (record, secrets, opts) => {
     const factory = drivers[record.kind]
     if (!factory) throw new Error(`unknown place kind '${record.kind}'`)
-    return factory(record, secrets)
+    return factory(record, secrets, opts)
   }
 
   const stampOf = (r: PlaceRecord) => `${r.kind}:${String(r.updatedAt)}`
@@ -62,6 +91,7 @@ export async function createPlaceRegistry(deps: { store: Store; config: SandboxC
       maxRunning: localRec?.maxRunning ?? null,
       driver: local,
       gpus: localRec?.gpus ?? [],
+      probe: probeOf(local),
     })
     const seen = new Set<string>([LOCAL_PLACE_ID])
     for (const r of records) {
@@ -80,7 +110,7 @@ export async function createPlaceRegistry(deps: { store: Store; config: SandboxC
         built.set(r.id, entry)
       }
       seen.add(r.id)
-      next.set(r.id, { id: r.id, name: r.name, kind: r.kind, enabled: r.enabled, isDefault: r.isDefault, maxRunning: r.maxRunning, driver: entry.driver, gpus: r.gpus ?? [] })
+      next.set(r.id, { id: r.id, name: r.name, kind: r.kind, enabled: r.enabled, isDefault: r.isDefault, maxRunning: r.maxRunning, driver: entry.driver, gpus: r.gpus ?? [], probe: probeOf(entry.driver) })
     }
     for (const [id, e] of built) {
       if (!seen.has(id)) {

@@ -16,7 +16,7 @@ import type { Limits, SandboxConfig } from './config.ts'
 import { envdToken } from './envd/token.ts'
 import { bootstrap } from './places/bootstrap.ts'
 import { assignGpus } from './places/gpus.ts'
-import type { Driver, Handle } from './places/driver.ts'
+import { HostKeyChangedError, type Driver, type Handle } from './places/driver.ts'
 import type { Place, PlaceRegistry } from './places/registry.ts'
 import type { GpuInfo, SandboxRecord, Store, TemplateSpec } from './store/types.ts'
 
@@ -89,7 +89,8 @@ export interface SandboxService {
   start(owner: string, id: string): Promise<SandboxRecord>
   stop(owner: string, id: string): Promise<SandboxRecord>
   reset(owner: string, id: string, opts: { keepWorkspace: boolean }): Promise<SandboxRecord>
-  destroy(owner: string, id: string): Promise<void>
+  /** `force` (admin) forgets the record even when its place cannot be reached; whatever the machine left behind is logged. */
+  destroy(owner: string, id: string, opts?: { force?: boolean }): Promise<void>
   touch(owner: string, id: string): Promise<void>
   /** Where to reach the sandbox's envd, and its access token; starts a stopped sandbox. */
   endpoint(owner: string, id: string): Promise<{ baseUrl: string; token: string; release?: () => void }>
@@ -178,24 +179,33 @@ export function createSandboxService(deps: {
   /** For calls that put work on the place (create, start, reset): it must be enabled and answer. */
   async function mustAvailable(place: Place): Promise<void> {
     if (!place.enabled) throw new PlaceDisabledError(place.name)
-    const a = await place.driver.probe().catch((e: unknown) => ({ ok: false as const, reason: message(e) }))
-    if (!a.ok) throw new PlaceUnavailableError(place.name, a.reason)
+    const a = await place.probe()
+    if (!a.ok) {
+      if (a.hostKeyChanged) throw new HostKeyChangedError()
+      throw new PlaceUnavailableError(place.name, a.reason)
+    }
   }
 
   /** The GPUs a place has now: what its driver reports, else what was stored when it was added. */
   async function gpusOf(place: Place): Promise<GpuInfo[]> {
-    const p = await place.driver.probe().catch(() => undefined)
-    return p?.ok && p.gpus && p.gpus.length > 0 ? p.gpus : place.gpus
+    const p = await place.probe()
+    return p.ok && p.gpus && p.gpus.length > 0 ? p.gpus : place.gpus
   }
 
   const heldBy = (r: SandboxRecord): string[] => (r.handle.gpuIds ? r.handle.gpuIds.split(',').filter(Boolean) : [])
-  /** A handle with the GPU assignment released. */
+  /** A handle with the GPU assignment released; the GPUs it had are remembered so the next start prefers them. */
   const withoutGpus = (h: Handle): Handle => {
-    const { gpuIds: _g, ...rest } = h
-    return rest
+    const { gpuIds, lastGpuIds, ...rest } = h
+    const last = gpuIds ?? lastGpuIds
+    return last ? { ...rest, lastGpuIds: last } : rest
+  }
+  /** A handle holding exactly these GPUs. */
+  const withGpus = (h: Handle, ids: string[]): Handle => {
+    const { lastGpuIds: _l, gpuIds: _g, ...rest } = h
+    return ids.length > 0 ? { ...rest, gpuIds: ids.join(',') } : rest
   }
   /** No machine exists yet (the assignment alone does not make one). */
-  const noMachine = (h: Handle) => Object.keys(withoutGpus(h)).length === 0
+  const noMachine = (h: Handle) => Object.keys(h).filter((k) => k !== 'gpuIds' && k !== 'lastGpuIds').length === 0
 
   /**
    * Gives the sandbox its GPUs, exclusively: under the place's GPU lock, the free ones are the place's
@@ -209,10 +219,13 @@ export function createSandboxService(deps: {
       const gpus = await gpusOf(place)
       const held = new Set((await store.sandboxes.listAll()).filter((o) => o.id !== r.id && o.backend === place.id).flatMap(heldBy))
       const free = gpus.filter((g) => !held.has(g.uuid))
-      const chosen = assignGpus(free, want, gpus.length)
+      // The GPUs it had before are preferred when still free: the same devices mean the container need not be recreated.
+      const last = (r.handle.lastGpuIds ?? '').split(',').filter(Boolean)
+      const same = want !== 'all' && last.length === want ? free.filter((g) => last.includes(g.uuid)) : []
+      const chosen = same.length === want ? same : assignGpus(free, want, gpus.length)
       if (!chosen) throw new GpuUnavailableError(place.name, free.length, gpus.length)
       const gpuIds = chosen.map((g) => g.uuid)
-      return { record: await save(r, { handle: { ...r.handle, gpuIds: gpuIds.join(',') } }), gpuIds }
+      return { record: await save(r, { handle: withGpus(r.handle, gpuIds) }), gpuIds }
     })
   }
 
@@ -221,7 +234,7 @@ export function createSandboxService(deps: {
     const handle = await call(place, () => place.driver.create(r.id, r.owner, r.template, { gpuIds }))
     try {
       const done = await call(place, () => provision(place.driver, r.id, handle, r.template))
-      return gpuIds.length > 0 ? { ...done, gpuIds: gpuIds.join(',') } : done
+      return withGpus(done, gpuIds)
     } catch (e) {
       await place.driver.destroy(r.id, handle, { keepWorkspace: false }).catch(() => {})
       throw e
@@ -316,7 +329,7 @@ export function createSandboxService(deps: {
         await place.driver.stop(started).catch(() => {})
         throw e
       }
-      if (reserved.gpuIds.length > 0) handle = { ...handle, gpuIds: reserved.gpuIds.join(',') }
+      handle = withGpus(handle, reserved.gpuIds)
       const t = now()
       return await save(r, { state: 'running', handle, error: null, startedAt: t, lastUsedAt: t })
     } catch (e) {
@@ -328,11 +341,20 @@ export function createSandboxService(deps: {
     }
   }
 
+  /** Logs what a forgotten sandbox may have left on its place (ids only, never credentials). */
+  function forgotten(r: SandboxRecord, why: string): void {
+    const left = Object.entries(r.handle).filter(([k]) => k === 'containerId' || k === 'volume').map(([k, v]) => `${k}=${v}`).join(' ')
+    console.warn(`[agentry-sandbox] forgot sandbox ${r.id} on place ${r.backend} without cleaning it up (${why}); it may have left behind: ${left || 'nothing recorded'}`)
+  }
+
   let sweeping: Promise<string[]> | undefined
   const sweepOnce = async (): Promise<string[]> => {
     const stopped: string[] = []
+    // A place that does not answer is skipped: waiting out its timeouts would stall every other place's upkeep.
+    const up = new Set<string>()
+    await Promise.all(places.list().map(async (p) => { if ((await p.probe()).ok) up.add(p.id) }))
     for (const snapshot of await store.sandboxes.listAll()) {
-      if (snapshot.state !== 'running') continue
+      if (snapshot.state !== 'running' || !up.has(snapshot.backend)) continue
       await locked(snapshot.id, async () => {
         const r = await store.sandboxes.getAny(snapshot.id)
         if (!r || r.state !== 'running') return
@@ -442,15 +464,26 @@ export function createSandboxService(deps: {
       })
     },
 
-    async destroy(owner, id) {
+    async destroy(owner, id, opts = {}) {
       await locked(id, async () => {
         const r = await load(owner, id)
-        const place = placeOf(r)
-        await call(place, () => place.driver.destroy(r.id, r.handle, { keepWorkspace: false }))
+        const place = places.get(r.backend)
+        // Nothing to clean up through: the place was removed or can no longer be built. The record is forgotten.
+        if (!place) {
+          forgotten(r, 'the place is no longer configured')
+          await store.sandboxes.delete(id, owner)
+          return undefined
+        }
+        try {
+          await call(place, () => place.driver.destroy(r.id, r.handle, { keepWorkspace: false }))
+        } catch (e) {
+          if (!opts.force) throw e
+          forgotten(r, message(e))
+        }
         await store.sandboxes.delete(id, owner)
         return place
       }).then(async (place) => {
-        if ((await store.sandboxes.list(owner)).length === 0 && place.driver.releaseOwner) await place.driver.releaseOwner(owner).catch(() => {})
+        if (place && (await store.sandboxes.list(owner)).length === 0 && place.driver.releaseOwner) await place.driver.releaseOwner(owner).catch(() => {})
       })
     },
 
@@ -493,7 +526,7 @@ export function createSandboxService(deps: {
       const unknown: string[] = []
       for (const place of places.list()) {
         // A place that does not answer is left alone: its sandboxes keep their recorded state.
-        const probe = await place.driver.probe().catch(() => ({ ok: false as const }))
+        const probe = await place.probe()
         if (!probe.ok) continue
         let managed: Awaited<ReturnType<Driver['listManaged']>>
         try {

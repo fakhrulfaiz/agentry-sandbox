@@ -6,10 +6,11 @@
  */
 import Docker from 'dockerode'
 import pg from 'pg'
-import { createDockerDriver, dockerClient, dockerDshRuntime } from './places/drivers/docker.ts'
+import { createDockerDriver } from './places/drivers/docker.ts'
 import { dockerSshFactory } from './places/drivers/docker-ssh.ts'
 import { createPlaceRegistry } from './places/registry.ts'
 import { createNetworkGuard } from './backends/network-guard.ts'
+import { createEnsureImage } from './places/images.ts'
 import { ConfigError, loadConfig } from './config.ts'
 import { createServer } from './http/server.ts'
 import { createSandboxService } from './sandboxes.ts'
@@ -26,12 +27,15 @@ async function main(): Promise<void> {
   if (applied.length > 0) log('migrated', applied)
   const store = createPostgresStore(pool)
   const docker = new Docker()
-  const guard = createNetworkGuard(docker, config)
-  const local = createDockerDriver(config, guard, docker)
-  const places = await createPlaceRegistry({ store, config, local, drivers: { 'docker-ssh': dockerSshFactory(config) } })
-  const service = createSandboxService({ store, places, config, dshRuntime: dockerDshRuntime(config, dockerClient(config)) })
+  const guard = createNetworkGuard(docker, config, createEnsureImage(docker))
+  const local = createDockerDriver(config, guard, docker, docker, { ensure: createEnsureImage(docker) })
+  const places = await createPlaceRegistry({ store, config, local, drivers: { 'docker-ssh': dockerSshFactory(config) }, probeTtlMs: 30_000, probeTimeoutMs: 5_000 })
+  const service = createSandboxService({ store, places, config })
   await service.loadSettings()
 
+  // GPUs are looked for once here (not per request) and remembered.
+  const found = await local.discoverGpus?.().catch(() => [])
+  if (found && found.length > 0) log('gpus', found.map((g) => g.name))
   const available = await local.probe()
   log(available.ok ? `docker ${available.version}` : `docker unavailable: ${available.reason}`)
   // Reconciles every place that answers; one that does not is skipped.

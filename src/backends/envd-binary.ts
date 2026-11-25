@@ -6,9 +6,19 @@
 import type Docker from 'dockerode'
 import { extract, pack } from 'tar-stream'
 
-const cache = new Map<string, Promise<Buffer>>()
+import type { EnsureImage } from '../places/images.ts'
 
-async function readEnvd(docker: Docker, image: string): Promise<Buffer> {
+/** Per Docker client (each host has its own architecture), then per image. */
+const cache = new WeakMap<Docker, Map<string, Promise<Buffer>>>()
+
+function cacheOf<T>(store: WeakMap<Docker, Map<string, Promise<T>>>, docker: Docker): Map<string, Promise<T>> {
+  let m = store.get(docker)
+  if (!m) store.set(docker, (m = new Map()))
+  return m
+}
+
+async function readEnvd(docker: Docker, image: string, ensure?: EnsureImage): Promise<Buffer> {
+  await ensure?.(image)
   const container = await docker.createContainer({ Image: image, Cmd: ['/envd'] })
   try {
     const stream = (await container.getArchive({ path: '/envd' })) as NodeJS.ReadableStream
@@ -34,20 +44,21 @@ async function readEnvd(docker: Docker, image: string): Promise<Buffer> {
   }
 }
 
-/** The raw envd binary from `image` (cached per image). */
-export function loadEnvdBinary(docker: Docker, image: string): Promise<Buffer> {
-  let p = cache.get(image)
+/** The raw envd binary from `image` on this Docker client's host (cached per client and image; pulled when missing). */
+export function loadEnvdBinary(docker: Docker, image: string, ensure?: EnsureImage): Promise<Buffer> {
+  const m = cacheOf(cache, docker)
+  let p = m.get(image)
   if (!p) {
-    p = readEnvd(docker, image)
-    p.catch(() => cache.delete(image))
-    cache.set(image, p)
+    p = readEnvd(docker, image, ensure)
+    p.catch(() => m.delete(image))
+    m.set(image, p)
   }
   return p
 }
 
 /** A tar placing envd at `/opt/agentry/envd`, for `container.putArchive(tar, { path: '/' })`. */
-export async function envdArchive(docker: Docker, image: string): Promise<Buffer> {
-  const binary = await loadEnvdBinary(docker, image)
+export async function envdArchive(docker: Docker, image: string, ensure?: EnsureImage): Promise<Buffer> {
+  const binary = await loadEnvdBinary(docker, image, ensure)
   const p = pack()
   p.entry({ name: 'opt/agentry', type: 'directory', mode: 0o755 })
   p.entry({ name: 'opt/agentry/envd', mode: 0o755, size: binary.length }, binary)
@@ -57,9 +68,10 @@ export async function envdArchive(docker: Docker, image: string): Promise<Buffer
   return Buffer.concat(parts)
 }
 
-const trees = new Map<string, Promise<Buffer>>()
+const trees = new WeakMap<Docker, Map<string, Promise<Buffer>>>()
 
-async function readTree(docker: Docker, image: string, path: string): Promise<Buffer> {
+async function readTree(docker: Docker, image: string, path: string, ensure?: EnsureImage): Promise<Buffer> {
+  await ensure?.(image)
   const container = await docker.createContainer({ Image: image, Cmd: ['/none'] })
   try {
     const stream = (await container.getArchive({ path })) as NodeJS.ReadableStream
@@ -75,15 +87,16 @@ async function readTree(docker: Docker, image: string, path: string): Promise<Bu
 
 /**
  * The directory `path` of `image` as Docker's tar (entries rooted at its basename),
- * cached per image, for `putArchive(tar, { path: dirname(path) })`.
+ * cached per Docker client and image, for `putArchive(tar, { path: dirname(path) })`.
  */
-export function treeArchive(docker: Docker, image: string, path: string): Promise<Buffer> {
+export function treeArchive(docker: Docker, image: string, path: string, ensure?: EnsureImage): Promise<Buffer> {
   const key = `${image}\0${path}`
-  let p = trees.get(key)
+  const m = cacheOf(trees, docker)
+  let p = m.get(key)
   if (!p) {
-    p = readTree(docker, image, path)
-    p.catch(() => trees.delete(key))
-    trees.set(key, p)
+    p = readTree(docker, image, path, ensure)
+    p.catch(() => m.delete(key))
+    m.set(key, p)
   }
   return p
 }

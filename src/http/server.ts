@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { openSecrets, sealSecrets } from '../crypto/secrets.ts'
 import { HostKeyChangedError, type Driver } from '../places/driver.ts'
-import { LOCAL_PLACE_ID, type PlaceRegistry } from '../places/registry.ts'
+import { LOCAL_PLACE_ID, type PlaceRegistry, type ProbeResult } from '../places/registry.ts'
 import type { SandboxConfig } from '../config.ts'
 import { GpuUnavailableError, LimitError, NotFoundError, PlaceDisabledError, PlaceUnavailableError, QuotaExceededError, type SandboxService } from '../sandboxes.ts'
 import type { GpuInfo, PlaceRecord, SandboxRecord, Store, TemplateRecord, TemplateSpec } from '../store/types.ts'
@@ -226,8 +226,9 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
   const { config, service, store, places } = deps
   /** The default place's driver, as the "backend" the admin overview describes. */
   const backendOf = async () => {
-    const { driver } = places.default()
-    const { gpus: _g, ...av } = await driver.probe()
+    const place = places.default()
+    const { driver } = place
+    const { gpus: _g, ...av } = await place.probe()
     return { kind: driver.kind, capabilities: driver.capabilities, available: av, describeImage: driver.describeImage?.bind(driver) }
   }
   const keyHashes = config.apiKeyHashes.map((k) => Buffer.from(k.slice('sha256:'.length), 'hex'))
@@ -251,10 +252,10 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
   }
 
   /** Builds a driver from request fields; a bad kind or config answers 400. */
-  function buildDriver(kind: string, cfg: Record<string, unknown>, secrets: Record<string, string>): Driver {
+  function buildDriver(kind: string, cfg: Record<string, unknown>, secrets: Record<string, string>, forTest = false): Driver {
     const record: PlaceRecord = { id: 'candidate', name: 'candidate', kind, config: cfg, secrets: null, enabled: true, isDefault: false, maxRunning: null, gpus: null, createdAt: 0, updatedAt: 0 }
     try {
-      return places.makeDriver(record, secrets)
+      return places.makeDriver(record, secrets, forTest ? { forTest: true } : undefined)
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       throw invalid(/unknown place kind/.test(msg) ? 'unknown place kind' : msg)
@@ -284,14 +285,14 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
     const records = new Map((await store.places.list()).map((r) => [r.id, r]))
     const all = await service.listEverything()
     const live = places.list()
-    const view = async (p: { id: string; name: string; kind: string; enabled: boolean; isDefault: boolean; maxRunning: number | null; driver?: Driver; gpus: GpuInfo[] }) => {
+    const view = async (p: { id: string; name: string; kind: string; enabled: boolean; isDefault: boolean; maxRunning: number | null; probe?: () => Promise<ProbeResult>; gpus: GpuInfo[] }) => {
       const rec = records.get(p.id)
-      const probed = p.driver ? await probeOf(p.driver) : { ok: false as const, reason: 'This place could not be set up (unknown kind or unreadable credentials).', gpus: undefined }
+      const probed = p.probe ? await p.probe() : { ok: false as const, reason: 'This place could not be set up (unknown kind or unreadable credentials).', gpus: undefined }
       return {
         id: p.id, name: p.name, kind: p.kind, enabled: p.enabled, default: p.isDefault, max_running: p.maxRunning,
         config: p.id === LOCAL_PLACE_ID ? {} : rec?.config ?? {}, has_secrets: rec?.secrets != null,
         available: probed.ok, ...(probed.ok ? {} : { reason: probed.reason }),
-        gpus: gpusWire(probed.ok && probed.gpus ? probed.gpus : p.gpus), sandboxes: all.filter((r) => r.backend === p.id).length,
+        gpus: gpusWire(probed.ok && probed.gpus && probed.gpus.length > 0 ? probed.gpus : p.gpus), sandboxes: all.filter((r) => r.backend === p.id).length,
       }
     }
     const out = await Promise.all(live.map((p) => view(p)))
@@ -308,8 +309,9 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
       if (typeof b.kind !== 'string') throw invalid('kind is required')
       const cfg = { ...objectField(b.config, 'config') }
       delete cfg.host_key // connect without trusting a key; the fingerprint seen is returned
-      const driver = buildDriver(b.kind, cfg, secretsField(b.secrets))
+      const driver = buildDriver(b.kind, cfg, secretsField(b.secrets), true)
       try {
+        // Reachability only: nothing runs on a machine whose key is not yet confirmed (no GPU discovery, no pulls).
         const probed = await probeOf(driver)
         const hostKey = driver.observedHostKey?.()
         return { status: 200, body: { ok: probed.ok, ...(probed.ok ? {} : { reason: probed.reason }), ...(hostKey ? { host_key: hostKey } : {}), ...(probed.ok && probed.gpus && probed.gpus.length > 0 ? { gpus: gpusWire(probed.gpus) } : {}) } }
@@ -324,12 +326,14 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
       if (b.kind === 'docker') throw invalid('the local Docker place is built in')
       const cfg = { ...objectField(b.config, 'config') }
       if (b.host_key !== undefined) cfg.host_key = hostKeyField(b.host_key)
+      if (b.kind === 'docker-ssh' && !cfg.host_key) throw invalid('host_key is required: test the connection and confirm the host key first')
       const secrets = secretsField(b.secrets)
       const driver = buildDriver(b.kind, cfg, secrets)
       let gpus: GpuInfo[] | null = null
       try {
-        const probed = await probeOf(driver)
-        if (probed.ok && probed.gpus && probed.gpus.length > 0) gpus = probed.gpus
+        // GPUs are looked for once, now that the host key is pinned, and stored.
+        const found = (await driver.discoverGpus?.().catch(() => undefined)) ?? []
+        if (found.length > 0) gpus = found
       } finally {
         await driver.close?.().catch(() => {})
       }
@@ -371,9 +375,18 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
         if (isLocal) throw invalid('the local Docker place has no connection settings')
         const cfg = b.config !== undefined ? { ...objectField(b.config, 'config') } : { ...rec.config }
         if (b.host_key !== undefined) cfg.host_key = hostKeyField(b.host_key)
+        // A save that leaves the key out keeps the pinned one; a remote place never ends up unpinned.
+        if (cfg.host_key === undefined && rec.config.host_key !== undefined) cfg.host_key = rec.config.host_key
+        if (rec.kind === 'docker-ssh' && !cfg.host_key) throw invalid('host_key is required: test the connection and confirm the host key first')
         const secrets = b.secrets !== undefined ? secretsField(b.secrets) : undefined
         const effective = secrets ?? (rec.secrets ? openSecrets(config.secret, rec.secrets) : {})
-        await buildDriver(rec.kind, cfg, effective).close?.().catch(() => {})
+        const candidate = buildDriver(rec.kind, cfg, effective)
+        try {
+          const found = (await candidate.discoverGpus?.().catch(() => undefined)) ?? []
+          if (found.length > 0) patch.gpus = found
+        } finally {
+          await candidate.close?.().catch(() => {})
+        }
         patch.config = cfg
         if (secrets) patch.secrets = Object.keys(secrets).length > 0 ? sealSecrets(config.secret, secrets) : null
       }
@@ -395,7 +408,7 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
   }
 
   /** `/v1/admin/...`: every owner's sandboxes, the service overview and the live limits. */
-  async function dispatchAdmin(method: string, path: string, body: () => Promise<Record<string, unknown>>): Promise<{ status: number; body?: unknown }> {
+  async function dispatchAdmin(method: string, path: string, body: () => Promise<Record<string, unknown>>, query: URLSearchParams): Promise<{ status: number; body?: unknown }> {
     const [, , , a, id, action] = path.split('/')
     if (a === 'overview' && !id && method === 'GET') {
       const backend = await backendOf()
@@ -417,7 +430,7 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
       const owner = id ? await service.ownerOf(id) : undefined
       if (!id || owner === undefined) throw new NotFoundError(`sandbox ${id ?? ''} not found`)
       if (!action && method === 'DELETE') {
-        await service.destroy(owner, id)
+        await service.destroy(owner, id, { force: query.get('force') === 'true' })
         return { status: 200, body: { id, object: 'sandbox.deleted', deleted: true } }
       }
       if (action === 'start' && method === 'POST') return { status: 200, body: { ...sandboxToWire(await service.start(owner, id), config.defaultImage), owner } }
@@ -458,9 +471,9 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
     const [, a, id, action, ...rest] = seg
     if (a === 'backends' && !id && method === 'GET') {
       const out = await Promise.all(places.list().filter((p) => p.enabled).map(async (p) => {
-        const probed = await probeOf(p.driver)
+        const probed = await p.probe()
         const info = probed.ok && p.driver.describeImage ? await p.driver.describeImage(config.defaultImage).catch(() => undefined) : undefined
-        const gpus = probed.ok && probed.gpus ? probed.gpus : p.gpus
+        const gpus = probed.ok && probed.gpus && probed.gpus.length > 0 ? probed.gpus : p.gpus
         return {
           id: p.id, name: p.name, default: p.isDefault, kind: p.kind, available: probed.ok, ...(probed.ok ? { version: probed.version } : { reason: probed.reason }),
           ...(gpus.length > 0 ? { gpus: gpusWire(gpus) } : {}), capabilities: p.driver.capabilities,
@@ -558,7 +571,7 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
           if (adminHashes.length === 0) return fail(res, 404, 'not_found', 'the admin surface is off (set AGENTRY_SANDBOX_ADMIN_KEYS)')
           if (!adminAuthorized(req)) return fail(res, 401, 'unauthorized', 'a valid admin key is required')
           let adminBody: Promise<Record<string, unknown>> | undefined
-          const result = await dispatchAdmin(method, url.pathname, () => (adminBody ??= readJson(req)))
+          const result = await dispatchAdmin(method, url.pathname, () => (adminBody ??= readJson(req)), url.searchParams)
           return send(res, result.status, result.body)
         }
         if (!authorized(req)) return fail(res, 401, 'unauthorized', 'a valid API key is required')

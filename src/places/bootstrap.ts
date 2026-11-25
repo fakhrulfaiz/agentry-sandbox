@@ -93,21 +93,27 @@ export async function bootstrap(driver: Driver, id: string, handle: Handle, spec
     const accessToken = ep.token ?? envdToken(opts.secret, id)
     const envd = createEnvdClient({ baseUrl: ep.baseUrl, accessToken })
     const base = { accessToken, defaultWorkdir: workspaceOf(spec), ...(spec.env ? { envVars: spec.env } : {}) }
-    const ref = opts.dshRef ?? 'dsh'
+    // The runtime comes from the place's own daemon (its architecture), else from the service's source.
+    const source = driver.dshRuntime ? await driver.dshRuntime() : opts.dshRuntime ? { arch: '', tar: opts.dshRuntime } : null
+    const baseRef = opts.dshRef ?? 'dsh'
+    const ref = source?.arch ? `${baseRef}@${source.arch}` : baseRef
     const first = handle.provisioned !== 'true'
-    const copyDsh = opts.dshRuntime !== null && handle.dsh !== ref
+    // A container recreated on its kept workspace (new GPUs) gets only the container-layer steps again.
+    const workspaceKept = first && handle.recreated === 'true'
+    const copyDsh = source !== null && handle.dsh !== ref
     const must = async (user: string, script: string, what: string, cwd?: string) => {
       const r = await runInEnvd(envd, user, script, { ...(cwd ? { cwd } : {}), ...(spec.env ? { env: spec.env } : {}) })
       if (r.code !== 0) throw new Error(`${what} failed (exit ${String(r.code)}): ${(r.stderr || r.stdout).trim().slice(-500)}`)
     }
     if ((first || copyDsh) && driver.capabilities.runsAsRoot) await envd.init({ ...base, defaultUser: 'root' })
-    if (first) await provision(must, envd, spec)
+    if (first) await provision(must, envd, spec, workspaceKept)
     if (copyDsh) {
-      await envd.writeFile(DSH_TAR, new Uint8Array(await opts.dshRuntime!()), 'root')
+      await envd.writeFile(DSH_TAR, new Uint8Array(await source!.tar()), 'root')
       await must('root', `set -e; mkdir -p /opt/agentry && rm -rf /opt/agentry/dsh && tar -xf ${DSH_TAR} -C /opt/agentry; rm -f ${DSH_TAR}`, 'installing the DSH runtime')
     }
     await envd.init({ ...base, defaultUser: AGENT })
-    return { ...handle, provisioned: 'true', ...(opts.dshRuntime !== null ? { dsh: ref } : {}) }
+    const { recreated: _r, ...rest } = handle
+    return { ...rest, provisioned: 'true', ...(source !== null ? { dsh: ref } : {}) }
   } finally {
     ep.release?.()
   }
@@ -115,10 +121,12 @@ export async function bootstrap(driver: Driver, id: string, handle: Handle, spec
 
 type Must = (user: string, script: string, what: string, cwd?: string) => Promise<void>
 
-async function provision(must: Must, envd: ReturnType<typeof createEnvdClient>, spec: TemplateSpec): Promise<void> {
+async function provision(must: Must, envd: ReturnType<typeof createEnvdClient>, spec: TemplateSpec, workspaceKept: boolean): Promise<void> {
   const WORKSPACE = workspaceOf(spec)
   await must('root', ensureAgent(WORKSPACE), 'creating the agent user')
   if (spec.packages && spec.packages.length > 0) await must('root', installScript(spec.packages), 'installing packages')
+  // Template files and setup commands live in the workspace volume, which survived: running them again would clobber edits.
+  if (workspaceKept) return
   for (const file of spec.files ?? []) {
     const path = file.path.startsWith('/') ? file.path : `${WORKSPACE}/${file.path}`
     await must(AGENT, `mkdir -p "$(dirname ${sq(path)})"`, `preparing ${file.path}`)

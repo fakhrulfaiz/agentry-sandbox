@@ -319,7 +319,15 @@ async function act(s, action) {
 }
 async function remove(s) {
   if (!confirm(`Delete "${s.name}" (${s.owner})? Its files are removed for good. The user's environment in Agentry will show it as gone.`)) return
-  try { await call('DELETE', `/v1/admin/sandboxes/${encodeURIComponent(s.id)}`); showError(''); await refresh() } catch (e) { showError(e.message) }
+  const url = `/v1/admin/sandboxes/${encodeURIComponent(s.id)}`
+  try { await call('DELETE', url); showError(''); await refresh() } catch (e) {
+    if (e.message === 'signed out') return
+    showError(e.message)
+    // The machine could not be reached (gone for good?): offer to forget the record instead.
+    if (confirm(`"${s.name}" could not be removed from its place: ${e.message}\n\nForget it anyway? The record is deleted and users lose it, but its container or files may stay on that machine.`)) {
+      try { await call('DELETE', `${url}?force=true`); showError(''); await refresh() } catch (e2) { showError(e2.message) }
+    }
+  }
 }
 
 // ---------- places ----------

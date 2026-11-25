@@ -66,4 +66,26 @@ describe.skipIf(!dockerAvailable)('bootstrap', () => {
     expect(copies()).toBe(1)
     expect((await run('sbx_b', 'agent', 'cat /opt/agentry/dsh/marker')).stdout).toBe('x')
   }, 60_000)
+
+  it('I1: a recreated container (new GPUs) redoes the agent user and packages but not template files or setup commands', async () => {
+    const { driver, opts } = setup('sbx_b')
+    const spec = { files: [{ path: 'a.txt', content: 'template' }], setupCommands: ['echo ran >> /workspace/log'] }
+    const h = await bootstrap(driver, 'sbx_b', { provisioned: 'false', recreated: 'true' }, spec, opts)
+    expect(h.recreated).toBeUndefined()
+    expect(h.provisioned).toBe('true')
+    const r = await run('sbx_b', 'agent', 'id -un; ls /workspace/a.txt /workspace/log 2>&1; echo end')
+    expect(r.stdout.split('\n')[0]).toBe('agent')
+    expect(r.stdout).toMatch(/workspace\/a\.txt.*No such file/)
+    expect(r.stdout).toMatch(/workspace\/log.*No such file/)
+  }, 120_000)
+
+  it("I6: the runtime's ref carries the place's architecture, so another architecture is copied again", async () => {
+    const { driver, opts, copies } = setup('sbx_b')
+    driver.dshRuntime = async () => ({ arch: 'arm64', tar: async () => { return fakeTar() } })
+    const h = await bootstrap(driver, 'sbx_b', {}, {}, opts)
+    expect(h.dsh).toBe('rt-1@arm64')
+    expect(copies()).toBe(0)
+    driver.dshRuntime = async () => ({ arch: 'amd64', tar: async () => fakeTar() })
+    expect((await bootstrap(driver, 'sbx_b', h, {}, opts)).dsh).toBe('rt-1@amd64')
+  }, 120_000)
 })

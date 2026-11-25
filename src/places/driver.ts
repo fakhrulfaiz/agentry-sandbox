@@ -19,7 +19,8 @@ export interface Capabilities {
   templateFields: (keyof TemplateSpec)[]
 }
 
-export type Availability = { ok: true; version: string } | { ok: false; reason: string }
+/** `hostKeyChanged` marks a remote host whose key no longer matches the pinned one (HTTP 409 `place_host_key_changed`). */
+export type Availability = { ok: true; version: string } | { ok: false; reason: string; hostKeyChanged?: true }
 
 /** What an image ships, from its `org.agentry.*` labels. */
 export interface ImageInfo {
@@ -36,7 +37,12 @@ export interface StartContext {
 export interface Driver {
   kind: string
   capabilities: Capabilities
+  /** Cheap reachability check (no image pulls, no containers). `gpus` are those already discovered. */
   probe(): Promise<Availability & { gpus?: GpuInfo[] }>
+  /** Looks for GPUs (may run a container and pull an image), remembers and returns them. Run when a place is added, not per request. */
+  discoverGpus?(): Promise<GpuInfo[]>
+  /** The DSH runtime for this place's own machine architecture; null when disabled. Read through the place's own daemon. */
+  dshRuntime?(): Promise<{ arch: string; tar: () => Promise<Buffer> } | null>
   /** What an image ships, when the driver can tell (`undefined` for an unknown or unlabelled image). Never throws. */
   describeImage?(image: string): Promise<ImageInfo | undefined>
   /** Machine made AND envd reachable; not provisioned. Cleans up after itself when it fails. */
