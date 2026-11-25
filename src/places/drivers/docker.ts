@@ -40,7 +40,14 @@ export function dockerDshRuntime(config: SandboxConfig, client: Docker = dockerC
   return image ? () => treeArchive(client, image, '/opt/agentry/dsh') : null
 }
 
-export function createDockerDriver(config: SandboxConfig, network: NetworkGuard, client: Docker = dockerClient(config), puller: Docker = dockerClient(config, undefined)): Driver {
+/** Variations on the Docker driver: another kind name, another way to reach the published envd port (SSH tunnel). */
+export interface DockerDriverOptions {
+  kind?: string
+  /** Where envd answers given the container's published `127.0.0.1` port; default is that port directly. */
+  reach?: (hostPort: number) => Promise<{ baseUrl: string; release?: () => void }>
+}
+
+export function createDockerDriver(config: SandboxConfig, network: NetworkGuard, client: Docker = dockerClient(config), puller: Docker = dockerClient(config, undefined), options: DockerDriverOptions = {}): Driver {
 
   async function ensureImage(image: string): Promise<void> {
     try {
@@ -54,12 +61,12 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     await new Promise<void>((resolve, reject) => puller.modem.followProgress(stream, (err) => (err ? reject(err) : resolve())))
   }
 
-  async function envdEndpoint(handle: Handle): Promise<{ baseUrl: string }> {
+  async function envdEndpoint(handle: Handle): Promise<{ baseUrl: string; release?: () => void }> {
     const info = await client.getContainer(handle.containerId!).inspect()
     if (config.envdReach === 'loopback') {
       const port = info.NetworkSettings.Ports?.[ENVD_PORT]?.find((b) => b.HostIp === '127.0.0.1')?.HostPort
       if (!port) throw new Error('envd port is not published on 127.0.0.1')
-      return { baseUrl: `http://127.0.0.1:${port}` }
+      return options.reach ? options.reach(Number(port)) : { baseUrl: `http://127.0.0.1:${port}` }
     }
     const ip = info.NetworkSettings.Networks?.[handle.network ?? '']?.IPAddress
     if (!ip) throw new Error('sandbox has no container IP')
@@ -71,8 +78,12 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     let last = 'not started'
     for (;;) {
       try {
-        const { baseUrl } = await envdEndpoint(handle)
-        if (await createEnvdClient({ baseUrl, accessToken: '' }).health(AbortSignal.timeout(2_000))) return
+        const { baseUrl, release } = await envdEndpoint(handle)
+        try {
+          if (await createEnvdClient({ baseUrl, accessToken: '' }).health(AbortSignal.timeout(2_000))) return
+        } finally {
+          release?.()
+        }
         last = 'health check failed'
       } catch (e) {
         last = (e as Error).message
@@ -121,7 +132,7 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
   }
 
   return {
-    kind: 'docker',
+    kind: options.kind ?? 'docker',
     capabilities: { persistent: true, reset: true, isolated: true, network: true, resources: true, gpu: false, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] },
 
     async probe() {

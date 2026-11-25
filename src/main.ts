@@ -7,6 +7,7 @@
 import Docker from 'dockerode'
 import pg from 'pg'
 import { createDockerDriver, dockerClient, dockerDshRuntime } from './places/drivers/docker.ts'
+import { dockerSshFactory } from './places/drivers/docker-ssh.ts'
 import { createPlaceRegistry } from './places/registry.ts'
 import { createNetworkGuard } from './backends/network-guard.ts'
 import { ConfigError, loadConfig } from './config.ts'
@@ -27,7 +28,7 @@ async function main(): Promise<void> {
   const docker = new Docker()
   const guard = createNetworkGuard(docker, config)
   const local = createDockerDriver(config, guard, docker)
-  const places = await createPlaceRegistry({ store, config, local, drivers: {} })
+  const places = await createPlaceRegistry({ store, config, local, drivers: { 'docker-ssh': dockerSshFactory(config) } })
   const service = createSandboxService({ store, places, config, dshRuntime: dockerDshRuntime(config, dockerClient(config)) })
   await service.loadSettings()
 
