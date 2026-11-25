@@ -69,7 +69,7 @@ async function waitHealthy(driver: Driver, handle: Handle, timeoutMs: number): P
     try {
       const ep = await driver.envdEndpoint(handle)
       try {
-        if (await createEnvdClient({ baseUrl: ep.baseUrl, accessToken: '', ...(ep.headers ? { headers: ep.headers } : {}) }).health(AbortSignal.timeout(2_000))) return
+        if (await createEnvdClient({ baseUrl: ep.baseUrl, accessToken: ep.token ?? '', ...(ep.headers ? { headers: ep.headers } : {}) }).health(AbortSignal.timeout(2_000))) return
         last = 'health check failed'
       } finally {
         ep.release?.()

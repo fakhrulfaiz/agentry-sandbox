@@ -34,6 +34,10 @@ export interface E2bDeps {
   readyTimeoutMs?: number
   /** How long a `running` answer of `status` is trusted (default 15000; 0 asks E2B every time). */
   statusTtlMs?: number
+  /** Longest an E2B REST call may take (default 15000). */
+  apiTimeoutMs?: number
+  /** Longest one request to the sandbox host may take (default 5000). */
+  envdTimeoutMs?: number
 }
 
 const TOKEN = 'secret.envdAccessToken'
@@ -49,6 +53,8 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
   const retryDelay = deps.retryDelayMs ?? 2_000
   const readyTimeout = deps.readyTimeoutMs ?? 30_000
   const statusTtl = deps.statusTtlMs ?? 15_000
+  const apiTimeout = deps.apiTimeoutMs ?? 15_000
+  const envdTimeout = deps.envdTimeoutMs ?? 5_000
   /** Sandboxes last seen running, by E2B id, until when. */
   const runningUntil = new Map<string, number>()
 
@@ -66,8 +72,10 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
         method,
         headers: { 'X-API-Key': place.apiKey, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(apiTimeout),
       })
     } catch (e) {
+      if (e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError')) throw new TransientPlaceError(`E2B did not answer within ${String(apiTimeout / 1000)} s`)
       throw new TransientPlaceError(scrub(`E2B could not be reached: ${e instanceof Error ? e.message : String(e)}`))
     }
     return res
@@ -104,7 +112,7 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
     let last = 'no answer'
     for (;;) {
       try {
-        const res = await doFetch(`${host}/health`, { headers: envdHeaders(e2bId, token) })
+        const res = await doFetch(`${host}/health`, { headers: envdHeaders(e2bId, token), signal: AbortSignal.timeout(envdTimeout) })
         if (res.ok) return
         last = `HTTP ${String(res.status)}`
       } catch (e) {
@@ -178,13 +186,18 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
         templateID: place.template,
         timeout: place.timeoutS,
         autoPause: true,
+        secure: true,
         metadata: { [ID_KEY]: id, [OWNER_KEY]: owner },
         ...(spec.env && Object.keys(spec.env).length > 0 ? { envVars: spec.env } : {}),
         allow_internet_access: spec.network !== false,
       })
       if (!res.ok) await fail(res, 'creating the sandbox')
       const made = (await res.json()) as { sandboxID?: unknown; envdAccessToken?: unknown }
-      if (typeof made.sandboxID !== 'string' || typeof made.envdAccessToken !== 'string' || !made.envdAccessToken) throw new Error('E2B answered a create without a sandbox id and access token')
+      if (typeof made.sandboxID !== 'string' || !made.sandboxID) throw new Error('E2B answered a create without a sandbox id')
+      if (typeof made.envdAccessToken !== 'string' || !made.envdAccessToken) {
+        await kill(made.sandboxID).catch(() => {})
+        throw new Error('E2B did not return an envd access token')
+      }
       try {
         await ready(made.sandboxID, made.envdAccessToken)
       } catch (e) {
@@ -273,7 +286,8 @@ const URL_FIELD = (v: unknown, field: string, fallback: string): string => {
   } catch {
     throw new Error(`${field} must be a URL`)
   }
-  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error(`${field} must be an http(s) URL`)
+  const loopback = u.hostname === '127.0.0.1' || u.hostname === 'localhost'
+  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && loopback)) throw new Error(`${field} must be an https URL`)
   return raw
 }
 

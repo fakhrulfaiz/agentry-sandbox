@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { loadConfig } from '../src/config.ts'
 import { sealSecrets } from '../src/crypto/secrets.ts'
 import { createE2bDriver, e2bFactory } from '../src/places/drivers/e2b.ts'
@@ -9,6 +9,10 @@ import { createMemoryStore } from '../src/store/memory.ts'
 import { startTestService, type TestService } from '../src/testing.ts'
 import { startFakeE2b } from './support/fake-e2b.ts'
 import { createHash, randomBytes } from 'node:crypto'
+import { bootstrap } from '../src/places/bootstrap.ts'
+import { setRelayTlsForTests } from '../src/http/relay.ts'
+import { dockerAvailable } from './support/docker.ts'
+import { startBareEnvd } from './support/bare-envd.ts'
 
 const config = loadConfig({ AGENTRY_SANDBOX_DATABASE_URL: 'postgres://x@localhost/x', AGENTRY_SANDBOX_API_KEYS: `sha256:${'a'.repeat(64)}`, AGENTRY_SANDBOX_SECRET: 's'.repeat(32) })
 const cleanups: (() => unknown)[] = []
@@ -34,7 +38,7 @@ describe('e2b driver', () => {
     const s = await service.create('alice', { name: 'box', place: 'place_e2b', template: { env: { A: '1' }, network: false } })
     const [posted] = e2b.bodies.filter((b) => b.key === 'POST /v2/sandboxes')
     expect(posted!.headers['x-api-key']).toBe(e2b.apiKey)
-    expect(posted!.body).toEqual({ templateID: 'tpl-1', timeout: 600, autoPause: true, metadata: { 'agentry.sandbox.id': s.id, 'agentry.sandbox.owner': 'alice' }, envVars: { A: '1' }, allow_internet_access: false })
+    expect(posted!.body).toEqual({ templateID: 'tpl-1', timeout: 600, autoPause: true, secure: true, metadata: { 'agentry.sandbox.id': s.id, 'agentry.sandbox.owner': 'alice' }, envVars: { A: '1' }, allow_internet_access: false })
     const [e2bId] = [...e2b.sandboxes.keys()]
     const token = e2b.sandboxes.get(e2bId!)!.envdAccessToken
     // The token is in the sealed secrets only: not in the handle, the record's public fields or the API's view.
@@ -123,7 +127,7 @@ describe('e2b driver', () => {
     const { e2b, places } = await setup()
     const driver = places.get('place_e2b')!.driver
     for (const id of ['sbx_a', 'sbx_b', 'sbx_c']) await driver.create(id, 'o', {}, { gpuIds: [] })
-    e2b.sandboxes.set('foreign', { sandboxID: 'foreign', state: 'running', envdAccessToken: 'x', metadata: {}, body: {}, timeout: 0 })
+    e2b.sandboxes.set('foreign', { sandboxID: 'foreign', state: 'running', envdAccessToken: 'x', secure: true, metadata: {}, body: {}, timeout: 0 })
     expect((await driver.listManaged()).map((m) => m.id).sort()).toEqual(['sbx_a', 'sbx_b', 'sbx_c'])
   })
 
@@ -203,4 +207,65 @@ describe('e2b driver', () => {
     expect((await call(`/v1/admin/places/${created.id}`, 'PUT', { config: { template: 'other', api_url: e2b.url, sandbox_host: e2b.url } })).status).toBe(200)
     expect((await call(`/v1/admin/places/${created.id}`, 'PUT', { config: { template: 'other', api_url: e2b.url + '/', sandbox_host: e2b.url }, secrets: { api_key: e2b.apiKey } })).status).toBe(200)
   })
+})
+
+describe('e2b final review 2', () => {
+  const place = (e2b: { url: string; apiKey: string }, deps = {}) =>
+    createE2bDriver({ apiKey: e2b.apiKey, template: 'tpl-1', apiUrl: e2b.url, sandboxHost: e2b.url, timeoutS: 600 }, deps)
+
+  it('I-A: a create answered without an envd access token kills the sandbox and fails', async () => {
+    const e2b = await startFakeE2b()
+    cleanups.push(() => e2b.close())
+    // E2B treats a create without `secure` as unsecured: no token comes back.
+    const unsecured: typeof fetch = (input, init) => {
+      const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : undefined
+      if (body && 'secure' in body) delete body.secure
+      return fetch(input, body ? { ...init, body: JSON.stringify(body) } : init)
+    }
+    await expect(place(e2b, { fetch: unsecured }).create('sbx_1', 'alice', {}, { gpuIds: [] })).rejects.toThrow('E2B did not return an envd access token')
+    expect(e2b.sandboxes.size).toBe(0)
+  })
+
+  it('I-B: a call E2B never answers fails as unavailable within the timeout', async () => {
+    const e2b = await startFakeE2b()
+    cleanups.push(() => e2b.close())
+    const driver = place(e2b, { apiTimeoutMs: 200 })
+    e2b.hangNext()
+    const t = Date.now()
+    await expect(driver.status({ e2bId: 'isb1' })).rejects.toThrow(/did not answer within/)
+    expect(Date.now() - t).toBeLessThan(3_000)
+    await expect(driver.status({ e2bId: 'isb1' })).resolves.toBe('missing')
+  })
+
+  it('Minor: api_url and sandbox_host must be https, except loopback', () => {
+    const rec = (config: Record<string, unknown>) => ({ id: 'p', name: 'p', kind: 'e2b', config, secrets: '', enabled: true, isDefault: false, maxRunning: null, gpus: null, createdAt: 0, updatedAt: 0 })
+    const make = (config: Record<string, unknown>) => e2bFactory()(rec(config) as never, { api_key: 'k' })
+    expect(() => make({ api_url: 'http://api.example.com' })).toThrow(/https/)
+    expect(() => make({ sandbox_host: 'http://sandbox.example.com' })).toThrow(/https/)
+    expect(() => make({ api_url: 'http://127.0.0.1:1234', sandbox_host: 'http://localhost:1' })).not.toThrow()
+  })
+
+  it('Minor: setRelayTlsForTests refuses to run outside tests', () => {
+    vi.stubEnv('NODE_ENV', 'production')
+    vi.stubEnv('VITEST', '')
+    try {
+      expect(() => setRelayTlsForTests({ rejectUnauthorized: false })).toThrow(/tests only/)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
+  it.skipIf(!dockerAvailable)('I-C: the full create path (driver + shared bootstrap) completes through the sandbox host', async () => {
+    const envd = await startBareEnvd()
+    cleanups.push(() => envd.stop())
+    const e2b = await startFakeE2b('e2b_test_key_123', { envdUpstream: envd.baseUrl })
+    cleanups.push(() => e2b.close())
+    const driver = createE2bDriver({ apiKey: e2b.apiKey, template: 'tpl-1', apiUrl: e2b.url, sandboxHost: e2b.url, timeoutS: 600 })
+    const handle = await driver.create('sbx_c', 'alice', {}, { gpuIds: [] })
+    const done = await bootstrap(driver, 'sbx_c', handle, { setupCommands: ['echo hi > /workspace/ok'] }, { secret: 's'.repeat(32), dshRuntime: null, startTimeoutMs: 30_000 })
+    expect(done.provisioned).toBe('true')
+    // Health went through the sandbox host with the sandbox's token, and the Connect calls after it too.
+    expect(e2b.log.some((l) => l.startsWith('GET /health'))).toBe(true)
+    expect(e2b.log.some((l) => l.includes('/process.Process/'))).toBe(true)
+  }, 180_000)
 })

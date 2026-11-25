@@ -16,6 +16,7 @@ const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'up
 /** Test-only: extra TLS options (a trusted CA) for https upstreams. Product code never sets it, and verification is never disabled. */
 let tlsForTests: https.RequestOptions = {}
 export function setRelayTlsForTests(opts: https.RequestOptions): void {
+  if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) throw new Error('setRelayTlsForTests is for tests only')
   tlsForTests = opts
 }
 

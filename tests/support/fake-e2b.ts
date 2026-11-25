@@ -10,6 +10,7 @@ export interface FakeSandbox {
   sandboxID: string
   state: 'running' | 'paused'
   envdAccessToken: string
+  secure: boolean
   metadata: Record<string, string>
   body: Record<string, unknown>
   timeout: number
@@ -25,6 +26,8 @@ export interface FakeE2b {
   bodies: { key: string; headers: http.IncomingHttpHeaders; body: unknown }[]
   /** Answers the next API call (any path) with this status. */
   failNext(status: number, headers?: Record<string, string>): void
+  /** The next API call (any path) is accepted and never answered. */
+  hangNext(): void
   /** Auto-pause: the sandbox's timeout ran out. */
   expire(id: string): void
   /** The sandbox is gone on E2B's side. */
@@ -32,14 +35,37 @@ export interface FakeE2b {
   close(): Promise<void>
 }
 
-export async function startFakeE2b(apiKey = 'e2b_test_key_123'): Promise<FakeE2b> {
+/** `envdUpstream`: a real envd's base URL; sandbox-host requests (those with `E2b-Sandbox-Id`) are checked and proxied there. */
+export async function startFakeE2b(apiKey = 'e2b_test_key_123', opts: { envdUpstream?: string } = {}): Promise<FakeE2b> {
   const sandboxes = new Map<string, FakeSandbox>()
   const log: string[] = []
   const bodies: FakeE2b['bodies'] = []
   let failing: { status: number; headers: Record<string, string> } | undefined
+  let hanging = false
   let counter = 0
 
   const server = http.createServer((req, res) => {
+    const sid = req.headers['e2b-sandbox-id']
+    if (sid !== undefined && opts.envdUpstream) {
+      // The shared sandbox host: check the sandbox and its token, then hand the request to envd.
+      const s = sandboxes.get(String(sid))
+      if (!s || s.state !== 'running' || req.headers['x-access-token'] !== s.envdAccessToken || req.headers['e2b-sandbox-port'] !== '49983') {
+        res.writeHead(502, { 'content-type': 'application/json' })
+        return void res.end(JSON.stringify({ message: 'no such sandbox' }))
+      }
+      log.push(`${req.method ?? 'GET'} ${req.url ?? ''} (sandbox host)`)
+      const up = new URL(opts.envdUpstream)
+      const headers: http.OutgoingHttpHeaders = { ...req.headers, host: up.host }
+      delete headers['e2b-sandbox-id']
+      delete headers['e2b-sandbox-port']
+      const out = http.request({ host: up.hostname, port: up.port, method: req.method, path: req.url, headers }, (r) => {
+        res.writeHead(r.statusCode ?? 502, r.headers)
+        r.pipe(res)
+      })
+      out.on('error', () => { res.destroy() })
+      req.pipe(out)
+      return
+    }
     const chunks: Buffer[] = []
     req.on('data', (c: Buffer) => chunks.push(c))
     req.on('end', () => {
@@ -66,17 +92,18 @@ export async function startFakeE2b(apiKey = 'e2b_test_key_123'): Promise<FakeE2b
       log.push(`${key}${url.search}`)
       bodies.push({ key, headers: req.headers, body })
       if (req.headers['x-api-key'] !== apiKey) return send(401, { message: 'invalid api key' })
+      if (hanging) { hanging = false; return }
       if (failing) {
         const f = failing
         failing = undefined
         return send(f.status, { message: 'forced failure' }, f.headers)
       }
       if (req.method === 'POST' && path === '/v2/sandboxes') {
-        const b = (body ?? {}) as { metadata?: Record<string, string>; timeout?: number }
+        const b = (body ?? {}) as { metadata?: Record<string, string>; timeout?: number; secure?: boolean }
         const id = `isb${String((counter += 1))}`
-        const s: FakeSandbox = { sandboxID: id, state: 'running', envdAccessToken: `tok-${id}-secret`, metadata: b.metadata ?? {}, body: b as Record<string, unknown>, timeout: b.timeout ?? 0 }
+        const s: FakeSandbox = { sandboxID: id, state: 'running', envdAccessToken: `tok-${id}-secret`, secure: b.secure === true, metadata: b.metadata ?? {}, body: b as Record<string, unknown>, timeout: b.timeout ?? 0 }
         sandboxes.set(id, s)
-        return send(201, { sandboxID: id, envdAccessToken: s.envdAccessToken, envdVersion: '0.2.4', domain: null })
+        return send(201, { sandboxID: id, ...(s.secure ? { envdAccessToken: s.envdAccessToken } : {}), envdVersion: '0.2.4', domain: null })
       }
       if (req.method === 'GET' && path === '/v2/sandboxes') {
         const next = Number(url.searchParams.get('nextToken') ?? 0)
@@ -121,6 +148,7 @@ export async function startFakeE2b(apiKey = 'e2b_test_key_123'): Promise<FakeE2b
     sandboxes,
     log,
     bodies,
+    hangNext: () => { hanging = true },
     failNext: (status, headers = {}) => { failing = { status, headers } },
     expire: (id) => { const s = sandboxes.get(id); if (s) s.state = 'paused' },
     remove: (id) => { sandboxes.delete(id) },
