@@ -50,6 +50,19 @@ describe('image names', () => {
   })
 })
 
+describe('sandbox Dockerfile', () => {
+  it('ships the pinned Playwright MCP and its Chromium in a shared folder, and lists them', () => {
+    const f = readFileSync(new URL('../images/sandbox/Dockerfile', import.meta.url), 'utf8')
+    expect(f).toContain('ARG PLAYWRIGHT_MCP_VERSION=0.0.80')
+    expect(f).toContain('npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}"')
+    expect(f).toContain('ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright')
+    expect(f).toContain('install --with-deps chromium')
+    // Playwright writes its own state under ~/.cache/ms-playwright; linking it to the read-only folder breaks it.
+    expect(f).not.toMatch(/ln -s \/opt\/ms-playwright/)
+    expect(f).toMatch(/org\.agentry\.tools="[^"]*chromium playwright-mcp/)
+  })
+})
+
 describe('dsh-runtime Dockerfile', () => {
   it('uses TARGETARCH to pick the Node tarball', () => {
     const f = readFileSync(new URL('../images/dsh-runtime/Dockerfile', import.meta.url), 'utf8')
