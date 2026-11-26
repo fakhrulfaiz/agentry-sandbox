@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import net from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 import { sq } from '../src/envd/run.ts'
 import { loadConfig } from '../src/config.ts'
@@ -123,6 +124,19 @@ describe('ssh-machine driver', () => {
     expect(machine.procs.size).toBe(1)
     expect(fs.existsSync(`${machine.home}/.agentry/sandboxes/sbx_a`)).toBe(true)
     expect(fs.existsSync(ws('a'))).toBe(true)
+  })
+
+  it('avoids a real host port that is not in the fake process table', async () => {
+    const { driver, ws } = await setup()
+    const base = portBase('sbx_e')
+    const blocker = net.createServer()
+    await new Promise<void>((resolve, reject) => {
+      blocker.once('error', reject)
+      blocker.listen(base, '127.0.0.1', resolve)
+    })
+    cleanups.push(() => new Promise<void>((resolve) => { blocker.close(() => resolve()) }))
+    const h = await driver.create('sbx_e', 'o', { workspacePath: ws('e') }, { gpuIds: [] })
+    expect(Number(h.port)).toBe(base + 1)
   })
 
   it('adopts an empty existing workspace, refuses a non-empty one', async () => {

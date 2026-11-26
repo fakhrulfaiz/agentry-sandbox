@@ -26,7 +26,7 @@ interface TestServer {
 }
 
 /** An SSH server on a random port that forwards direct-tcpip requests for real. */
-async function startServer(hostKey: string): Promise<TestServer> {
+async function startServer(hostKey: string, dockerVersion?: string): Promise<TestServer> {
   const state: TestServer = { port: 0, channels: 0, connections: [], close: async () => {} }
   const server = new Server({ hostKeys: [hostKey] }, (client) => {
     state.connections.push(client)
@@ -34,6 +34,18 @@ async function startServer(hostKey: string): Promise<TestServer> {
     // Any public key is accepted: these tests are about the host key, not user auth.
     client.on('authentication', (ctx) => (ctx.method === 'publickey' ? ctx.accept() : ctx.reject(['publickey'])))
     client.on('ready', () => {
+      if (dockerVersion) {
+        client.on('session', (acceptSession) => {
+          const session = acceptSession()
+          session.on('exec', (acceptExec, reject, info) => {
+            if (info.command !== 'docker system dial-stdio') return reject()
+            const stream = acceptExec()
+            const body = JSON.stringify({ Version: dockerVersion, ApiVersion: '1.51' })
+            stream.on('data', () => {})
+            stream.end(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${String(Buffer.byteLength(body))}\r\nConnection: close\r\n\r\n${body}`)
+          })
+        })
+      }
       client.on('tcpip', (accept, reject, info) => {
         state.channels++
         const upstream = net.connect(info.destPort, info.destIP, () => {
@@ -153,6 +165,16 @@ describe('ssh', () => {
     await unpinned.probe() // the server cannot run docker; only the key it presented matters
     expect(unpinned.observedHostKey?.()).toBe(fingerprint(blobOf(hostKeyA.public)))
     await expect(unpinned.create('i', 'o', {}, { gpuIds: [] })).rejects.toThrow(/not pinned/u)
+  })
+
+  it('a pinned docker-ssh place survives Docker API requests on Node 24', async () => {
+    const server = await startServer(hostKeyA.private, '29.7.2')
+    cleanups.push(() => server.close())
+    const config = loadConfig({ AGENTRY_SANDBOX_DATABASE_URL: 'postgres://x@localhost/x', AGENTRY_SANDBOX_API_KEYS: `sha256:${'a'.repeat(64)}`, AGENTRY_SANDBOX_SECRET: 's'.repeat(32) })
+    const target = `ssh://u@127.0.0.1:${String(server.port)}`
+    const d = createDockerSshDriver(config, { target, privateKey: user.private, hostKey: fingerprint(blobOf(hostKeyA.public)) })
+    cleanups.push(() => d.close?.())
+    await expect(d.probe()).resolves.toEqual({ ok: true, version: '29.7.2', gpus: [] })
   })
 
   it('C1: the admin page\'s exact request body reaches the real docker-ssh driver and returns the host key', async () => {
