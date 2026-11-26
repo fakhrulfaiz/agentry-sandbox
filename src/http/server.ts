@@ -378,9 +378,12 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
         if (!(b.enabled ?? rec.enabled)) throw new PlaceDisabledError(rec.name)
         patch.isDefault = true
       }
-      if (b.config !== undefined || b.secrets !== undefined || b.host_key !== undefined) {
+      const connectionChanged = b.config !== undefined || b.secrets !== undefined || b.host_key !== undefined
+      let cfg: Record<string, unknown> = { ...rec.config }
+      let effective: Record<string, string> = rec.secrets ? openSecrets(config.secret, rec.secrets) : {}
+      if (connectionChanged) {
         if (isLocal) throw invalid('the local Docker place has no connection settings')
-        const cfg = b.config !== undefined ? { ...objectField(b.config, 'config') } : { ...rec.config }
+        cfg = b.config !== undefined ? { ...objectField(b.config, 'config') } : { ...rec.config }
         if (b.host_key !== undefined) cfg.host_key = hostKeyField(b.host_key)
         // A save that leaves the key out keeps the pinned one; a remote place never ends up unpinned.
         if (cfg.host_key === undefined && rec.config.host_key !== undefined) cfg.host_key = rec.config.host_key
@@ -388,16 +391,26 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
         const secrets = b.secrets !== undefined ? secretsField(b.secrets) : undefined
         // The E2B key is a bearer secret: a new address must come with the key typed again, or the stored key would be sent there.
         if (rec.kind === 'e2b' && !secrets?.api_key && (['api_url', 'sandbox_host'] as const).some((k) => String(cfg[k] ?? '') !== String(rec.config[k] ?? ''))) throw invalid('re-enter the API key when changing the address')
-        const effective = secrets ?? (rec.secrets ? openSecrets(config.secret, rec.secrets) : {})
-        const candidate = buildDriver(rec.kind, cfg, effective)
-        try {
-          const found = (await candidate.discoverGpus?.().catch(() => undefined)) ?? []
-          if (found.length > 0) patch.gpus = found
-        } finally {
-          await candidate.close?.().catch(() => {})
-        }
+        if (secrets) effective = secrets
         patch.config = cfg
         if (secrets) patch.secrets = Object.keys(secrets).length > 0 ? sealSecrets(config.secret, secrets) : null
+      }
+      // Refresh GPUs on every Save, even when the connection is untouched: the stored key and pinned host key are
+      // enough, so a plain name/enable change still discovers a GPU added after the place was first saved.
+      if (!isLocal) {
+        try {
+          const candidate = buildDriver(rec.kind, cfg, effective)
+          try {
+            const found = (await candidate.discoverGpus?.().catch(() => undefined)) ?? []
+            if (found.length > 0) patch.gpus = found
+          } finally {
+            await candidate.close?.().catch(() => {})
+          }
+        } catch (e) {
+          // A failed refresh must never block a Save; keep the last known GPUs. Bad new connection details already
+          // failed validation above.
+          if (connectionChanged) throw e
+        }
       }
       await store.places.update(id, patch)
       await places.reload()
