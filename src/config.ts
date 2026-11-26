@@ -119,9 +119,9 @@ export function loadConfig(env: Env): SandboxConfig {
     apiKeyHashes,
     secret,
     docker: host ? { host } : {},
-    envdImage: env.AGENTRY_SANDBOX_ENVD_IMAGE?.trim() || 'agentry/envd:envd-v0.6.13',
-    dshRuntimeImage: env.AGENTRY_SANDBOX_DSH_RUNTIME_IMAGE?.trim() === 'none' ? '' : env.AGENTRY_SANDBOX_DSH_RUNTIME_IMAGE?.trim() || 'agentry/dsh-runtime:0.2.2-rc.1',
-    defaultImage: env.AGENTRY_SANDBOX_DEFAULT_IMAGE?.trim() || 'agentry/sandbox:1',
+    envdImage: env.AGENTRY_SANDBOX_ENVD_IMAGE?.trim() || 'ghcr.io/fakhrulfaiz/agentry-envd:envd-v0.6.13',
+    dshRuntimeImage: env.AGENTRY_SANDBOX_DSH_RUNTIME_IMAGE?.trim() === 'none' ? '' : env.AGENTRY_SANDBOX_DSH_RUNTIME_IMAGE?.trim() || 'ghcr.io/fakhrulfaiz/agentry-dsh-runtime:0.2.2-rc.1',
+    defaultImage: env.AGENTRY_SANDBOX_DEFAULT_IMAGE?.trim() || 'ghcr.io/fakhrulfaiz/agentry-sandbox:1',
     idleStopMinutes: integer(env, 'AGENTRY_SANDBOX_IDLE_MINUTES', 30),
     startTimeoutMs: integer(env, 'AGENTRY_SANDBOX_START_TIMEOUT_MS', 60_000),
     resources: {

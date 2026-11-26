@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.github
+.superpowers
+docs
+tests
+coverage
+*.log
+.env
+.env.test
+docker/*
+!docker/entrypoint.sh
+images

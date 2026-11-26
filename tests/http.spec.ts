@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { createFakeDriver } from '../src/places/drivers/fake.ts'
 import { startServer, type TestServer } from './support/server.ts'
 
 let s: TestServer
@@ -34,7 +35,7 @@ describe('HTTP API', () => {
     const created = await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'box', template: { image: 'python:3.13', setup_commands: ['echo hi'], resources: { memory_mb: 1024 } } }) })
     expect(created.status).toBe(201)
     const sbx = await json(created)
-    expect(sbx).toMatchObject({ object: 'sandbox', name: 'box', state: 'running', backend: 'fake', image: 'python:3.13', template: { image: 'python:3.13', setup_commands: ['echo hi'], resources: { memory_mb: 1024 } } })
+    expect(sbx).toMatchObject({ object: 'sandbox', name: 'box', state: 'running', backend: 'local', image: 'python:3.13', template: { image: 'python:3.13', setup_commands: ['echo hi'], resources: { memory_mb: 1024 } } })
     expect(typeof sbx.created_at).toBe('number')
     const id = sbx.id as string
     expect(((await json(await s.call('/v1/sandboxes'))).data as unknown[]).length).toBe(1)
@@ -77,12 +78,35 @@ describe('HTTP API', () => {
     }
   })
 
-  it('backend down answers 503 backend_unavailable, and /backends says why', async () => {
+  it('backend down answers 503 place_unavailable, and /backends says why', async () => {
     s.backend.setAvailable(false, 'Docker is not reachable')
     const r = await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'box' }) })
     expect(r.status).toBe(503)
-    expect((await json(r)).error).toMatchObject({ code: 'backend_unavailable', message: 'Docker is not reachable' })
-    expect((await json(await s.call('/v1/backends'))).data).toEqual([{ kind: 'fake', available: false, reason: 'Docker is not reachable', capabilities: expect.any(Object), default_image: { name: 'agentry/sandbox:1' } }])
+    expect((await json(r)).error).toMatchObject({ code: 'place_unavailable', message: expect.stringContaining('Docker is not reachable') })
+    expect((await json(await s.call('/v1/backends'))).data).toEqual([{ id: 'local', name: 'Local Docker', default: true, kind: 'fake', available: false, reason: 'Docker is not reachable', capabilities: expect.any(Object), default_image: { name: 'ghcr.io/fakhrulfaiz/agentry-sandbox:1' } }])
+  })
+
+  it('GET /v1/backends lists places default-first with gpus', async () => {
+    await s.close()
+    s = await startServer({ 'fake-ssh': () => Object.assign(createFakeDriver(), { kind: 'fake-ssh' }) })
+    s.backend.setGpus([{ index: 0, uuid: 'GPU-0', name: 'A100' }, { index: 1, uuid: 'GPU-1', name: 'A100' }])
+    const t = Date.now()
+    await s.store.places.insert({ id: 'gpu1', name: 'Alpha GPU box', kind: 'fake-ssh', config: {}, secrets: null, enabled: true, isDefault: false, maxRunning: null, gpus: null, createdAt: t, updatedAt: t })
+    await s.store.places.insert({ id: 'off', name: 'Disabled', kind: 'fake-ssh', config: {}, secrets: null, enabled: false, isDefault: false, maxRunning: null, gpus: null, createdAt: t, updatedAt: t })
+    await s.places.reload()
+    const data = (await json(await s.call('/v1/backends'))).data as { id: string; name: string; default: boolean; gpus?: unknown }[]
+    expect(data.map((p) => [p.id, p.default])).toEqual([['local', true], ['gpu1', false]])
+    expect(data[0]!.gpus).toEqual({ count: 2, models: ['A100'] })
+    expect(data[0]).toMatchObject({ capabilities: { gpu: false, persistent: true } })
+    expect(data[1]!.gpus).toBeUndefined()
+  })
+
+  it('create with an unknown place answers 400 naming it', async () => {
+    const r = await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'box', place: 'nowhere' }) })
+    expect(r.status).toBe(400)
+    expect((await json(r)).error).toMatchObject({ code: 'invalid_request', message: expect.stringContaining('nowhere') })
+    const ok = await json(await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'box', place: 'local' }) }))
+    expect(ok).toMatchObject({ place: 'local', backend: 'local', gpus: 0 })
   })
 
   it('unknown routes answer 404', async () => {
@@ -104,7 +128,7 @@ describe('limits over HTTP', () => {
 
 describe('image info', () => {
   it('reads org.agentry labels, and nothing from an unlabelled image', async () => {
-    const { imageInfoFromLabels } = await import('../src/backends/docker.ts')
+    const { imageInfoFromLabels } = await import('../src/places/drivers/docker.ts')
     expect(imageInfoFromLabels({ 'org.agentry.runtimes': '{"node":"24.21.0","python":"3.11","bad":1}', 'org.agentry.python-packages': 'pandas  numpy', 'org.agentry.tools': 'git' }))
       .toEqual({ runtimes: { node: '24.21.0', python: '3.11' }, python_packages: ['pandas', 'numpy'], tools: ['git'] })
     expect(imageInfoFromLabels({ 'org.agentry.runtimes': 'not json' })).toBeUndefined()

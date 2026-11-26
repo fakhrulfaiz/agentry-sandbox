@@ -6,8 +6,13 @@
  */
 import Docker from 'dockerode'
 import pg from 'pg'
-import { createDockerBackend } from './backends/docker.ts'
+import { createDockerDriver } from './places/drivers/docker.ts'
+import { dockerSshFactory } from './places/drivers/docker-ssh.ts'
+import { e2bFactory } from './places/drivers/e2b.ts'
+import { sshMachineFactory } from './places/drivers/ssh-machine.ts'
+import { createPlaceRegistry } from './places/registry.ts'
 import { createNetworkGuard } from './backends/network-guard.ts'
+import { createEnsureImage } from './places/images.ts'
 import { ConfigError, loadConfig } from './config.ts'
 import { createServer } from './http/server.ts'
 import { createSandboxService } from './sandboxes.ts'
@@ -24,21 +29,26 @@ async function main(): Promise<void> {
   if (applied.length > 0) log('migrated', applied)
   const store = createPostgresStore(pool)
   const docker = new Docker()
-  const guard = createNetworkGuard(docker, config)
-  const backend = createDockerBackend(config, guard)
-  const service = createSandboxService({ store, backend, config })
+  const guard = createNetworkGuard(docker, config, createEnsureImage(docker))
+  const local = createDockerDriver(config, guard, docker, docker, { ensure: createEnsureImage(docker) })
+  const places = await createPlaceRegistry({ store, config, local, drivers: { e2b: e2bFactory(), 'docker-ssh': dockerSshFactory(config), 'ssh-machine': sshMachineFactory(config, { local: docker }) }, probeTtlMs: 30_000, probeTimeoutMs: 5_000 })
+  const service = createSandboxService({ store, places, config })
   await service.loadSettings()
 
-  const available = await backend.available()
+  // GPUs are looked for once here (not per request) and remembered.
+  const found = await local.discoverGpus?.().catch(() => [])
+  if (found && found.length > 0) log('gpus', found.map((g) => g.name))
+  const available = await local.probe()
   log(available.ok ? `docker ${available.version}` : `docker unavailable: ${available.reason}`)
+  // Reconciles every place that answers; one that does not is skipped.
+  log('reconciled', await service.reconcile())
   if (available.ok) {
-    log('reconciled', await service.reconcile())
     // Rules left by crashed or removed sandboxes would block a later container that reuses the IP.
     const active = (await docker.listContainers({ all: true, filters: { label: ['agentry.managed=true'] } })).map((c) => c.Id)
     await guard.prune(active).catch((e: unknown) => log('rule prune failed', String(e)))
   }
 
-  const server = createServer({ config, service, store, backend })
+  const server = createServer({ config, service, store, places })
   await new Promise<void>((resolve) => server.listen(config.port, host, resolve))
   if (config.adminKeyHashes.length > 0) log(`admin page on http://${host}:${String(config.port)}/admin`)
   log(`listening on http://${host}:${String(config.port)} (envd reach: ${config.envdReach}, runtime: ${config.runtime}, egress guard: ${config.egress ? 'on' : 'off'}, limits: ${JSON.stringify({ ...service.limits(), owners: Object.keys(service.limits().owners).length })})`)

@@ -25,3 +25,4 @@ Design: `~/code/agentry-web/docs/superpowers/specs/2026-11-25-agentry-sandbox-de
 - `pnpm test` (Vitest; Docker suites skip when Docker is absent) · `pnpm typecheck` · `pnpm gen` (regenerate the envd client) · `pnpm images:build` (envd, DSH runtime, default sandbox and netguard images) · `pnpm dev`.
 - Run the dev server in herdr, never a pop-up terminal: `hc run --bg --no-parent --outlive-parent --name agentry-sandbox -- pnpm dev`.
 - Image pulls and builds use a credential-free Docker config (the Windows credential helper fails in WSL).
+- Releases: the service image `ghcr.io/fakhrulfaiz/agentry-sandbox-service` (`Dockerfile`, `docker/`) is published by `publish.yml` on merge to `main`; a release needs a new `package.json` version and a `## <version>` CHANGELOG section. `images.yml` publishes the base images separately. Build locally with a credential-free `DOCKER_CONFIG`.

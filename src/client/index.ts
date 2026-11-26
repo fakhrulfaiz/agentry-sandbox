@@ -16,6 +16,8 @@ export interface WireTemplate {
   network?: boolean
   files?: { path: string; content: string }[]
   resources?: { cpus?: number; memory_mb?: number }
+  place?: string
+  gpus?: number | 'all'
 }
 
 export interface WireSandbox {
@@ -23,6 +25,9 @@ export interface WireSandbox {
   object: 'sandbox'
   name: string
   backend: string
+  /** Id of the place the sandbox runs on (same as `backend`). */
+  place: string
+  gpus: number | 'all'
   state: 'provisioning' | 'running' | 'stopped' | 'failed' | 'deleting'
   template_id: string | null
   image: string
@@ -34,19 +39,40 @@ export interface WireSandbox {
   last_used_at: number | null
 }
 
+export interface WireCapabilities {
+  persistent: boolean
+  reset: boolean
+  keepFilesOnReset: boolean
+  isolated: boolean
+  network: boolean
+  resources: boolean
+  gpu: boolean
+  envdBuiltIn: boolean
+  runsAsRoot: boolean
+  templateFields: string[]
+}
+
+/** One enabled place, default first. */
 export interface WireBackend {
+  id: string
+  name: string
+  default: boolean
+  gpus?: { count: number; models: string[] }
   kind: string
   available: boolean
   version?: string
   reason?: string
   /** The image sandboxes use when a template names none, and what it ships (when labelled). */
   default_image?: { name: string; runtimes?: Record<string, string>; python_packages?: string[]; tools?: string[] }
-  capabilities: { persistent: boolean; network: boolean; resources: boolean; templateFields: string[] }
+  capabilities: WireCapabilities
 }
+
+/** Error codes the service answers with (others are possible). */
+export type SandboxApiErrorCode = 'unauthorized' | 'owner_required' | 'invalid_request' | 'not_found' | 'sandbox_failed' | 'quota_exceeded' | 'place_unavailable' | 'place_disabled' | 'gpu_unavailable' | 'place_in_use' | 'place_host_key_changed' | 'unreachable' | (string & {})
 
 /** A failed call: the service's `{ error: { code, message } }`, or `unreachable` when it did not answer. */
 export class SandboxApiError extends Error {
-  constructor(readonly status: number, readonly code: string, message: string) {
+  constructor(readonly status: number, readonly code: SandboxApiErrorCode, message: string) {
     super(message)
     this.name = 'SandboxApiError'
   }
@@ -56,7 +82,7 @@ export interface SandboxApi {
   backends(): Promise<WireBackend[]>
   list(): Promise<WireSandbox[]>
   get(id: string): Promise<WireSandbox>
-  create(body: { name: string; template_id?: string; template?: WireTemplate; workspace_path?: string }): Promise<WireSandbox>
+  create(body: { name: string; template_id?: string; template?: WireTemplate; workspace_path?: string; place?: string }): Promise<WireSandbox>
   start(id: string): Promise<WireSandbox>
   stop(id: string): Promise<WireSandbox>
   reset(id: string, opts: { keepWorkspace: boolean }): Promise<WireSandbox>

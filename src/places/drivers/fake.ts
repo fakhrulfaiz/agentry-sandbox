@@ -1,20 +1,24 @@
 /**
- * An in-memory Backend for tests (here and in Agentry's API): records every
+ * An in-memory Driver for tests (here and in Agentry's API): records every
  * call, can fail the next start, go unavailable, lose or invent sandboxes,
- * and point `endpoint` at any URL (a fake envd).
+ * and point `envdEndpoint` at any URL (a fake envd).
  */
-import type { TemplateSpec } from '../store/types.ts'
-import type { Availability, Backend, BackendHandle } from './types.ts'
+import type { GpuInfo, TemplateSpec } from '../../store/types.ts'
+import type { Availability, Driver, Handle } from '../driver.ts'
 
-export interface FakeBackend extends Backend {
+export interface FakeKnobs {
   calls: string[]
+  /** The GPU uuids last given to each sandbox's create or start. */
+  gpuIds: Map<string, string[]>
   failNextStart(reason: string): void
   setAvailable(ok: boolean, reason?: string): void
   /** Drops a sandbox as if its container vanished. */
   forget(id: string): void
   /** Adds a managed sandbox the service has no record of. */
   adoptForeign(id: string, owner: string): void
-  /** Where `endpoint` points (default `http://127.0.0.1:1`). */
+  /** The GPUs `probe` reports. */
+  setGpus(gpus: GpuInfo[]): void
+  /** Where `envdEndpoint` points (default `http://127.0.0.1:1`). */
   setEndpoint(baseUrl: string): void
   /** Delays every create by `ms` (to test calls racing a provisioning sandbox). */
   setCreateDelay(ms: number): void
@@ -23,7 +27,10 @@ export interface FakeBackend extends Backend {
   failConnections(message: string | undefined): void
 }
 
-export function createFakeBackend(): FakeBackend {
+export type FakeDriver = Driver & FakeKnobs
+
+export function createFakeDriver(): FakeDriver {
+  let gpus: GpuInfo[] = []
   const boxes = new Map<string, { owner: string; running: boolean }>()
   let failure: string | undefined
   let createFailure: string | undefined
@@ -35,12 +42,14 @@ export function createFakeBackend(): FakeBackend {
   let availability: Availability = { ok: true, version: 'fake' }
   let baseUrl = 'http://127.0.0.1:1'
   const calls: string[] = []
-  const idOf = (h: BackendHandle) => h.id ?? ''
+  const gpuIds = new Map<string, string[]>()
+  const idOf = (h: Handle) => h.id ?? ''
 
   return {
     kind: 'fake',
-    capabilities: { persistent: true, network: true, resources: false, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files'] },
+    capabilities: { persistent: true, reset: true, keepFilesOnReset: true, isolated: true, network: true, resources: false, gpu: false, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] },
     calls,
+    gpuIds,
     failNextStart(reason) {
       failure = reason
     },
@@ -52,6 +61,9 @@ export function createFakeBackend(): FakeBackend {
     },
     adoptForeign(id, owner) {
       boxes.set(id, { owner, running: false })
+    },
+    setGpus(g) {
+      gpus = g
     },
     setEndpoint(url) {
       baseUrl = url
@@ -65,16 +77,17 @@ export function createFakeBackend(): FakeBackend {
     failConnections(message) {
       connection = message
     },
-    async available() {
+    async probe() {
       if (connection !== undefined) return { ok: false, reason: connection }
-      return availability
+      return { ...availability, gpus }
     },
     async describeImage() {
       return { runtimes: { python: '3.11', node: '24' }, python_packages: ['pandas'], tools: ['git'] }
     },
-    async create(id: string, owner: string, _spec: TemplateSpec) {
+    async create(id: string, owner: string, _spec: TemplateSpec, ctx) {
       down()
       calls.push(`create ${id}`)
+      gpuIds.set(id, ctx.gpuIds)
       if (createDelay > 0) await new Promise((r) => setTimeout(r, createDelay))
       if (createFailure !== undefined) {
         const reason = createFailure
@@ -84,9 +97,10 @@ export function createFakeBackend(): FakeBackend {
       boxes.set(id, { owner, running: true })
       return { id }
     },
-    async start(id) {
+    async start(id, _handle, _spec, ctx) {
       down()
       calls.push(`start ${id}`)
+      gpuIds.set(id, ctx.gpuIds)
       await new Promise((r) => setTimeout(r, 5))
       if (failure !== undefined) {
         const reason = failure
@@ -114,7 +128,7 @@ export function createFakeBackend(): FakeBackend {
       const box = boxes.get(idOf(handle))
       return box ? (box.running ? 'running' : 'stopped') : 'missing'
     },
-    async endpoint() {
+    async envdEndpoint() {
       down()
       return { baseUrl }
     },

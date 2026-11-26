@@ -4,14 +4,14 @@ import type { AddressInfo } from 'node:net'
 import { GUARD_IMAGE } from '../src/backends/network-guard.ts'
 import { runOnce } from './support/docker.ts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { createDockerBackend } from '../src/backends/docker.ts'
+import { createDockerBackend } from './support/docker-backend.ts'
 import { createNetworkGuard } from '../src/backends/network-guard.ts'
-import type { BackendHandle } from '../src/backends/types.ts'
+import type { Handle as BackendHandle } from '../src/places/driver.ts'
 import { loadConfig } from '../src/config.ts'
 import { createEnvdClient } from '../src/envd/client.ts'
 import { runInEnvd } from '../src/envd/run.ts'
 import { envdToken } from '../src/envd/token.ts'
-import { docker, dockerAvailable } from './support/docker.ts'
+import { docker, dockerAvailable, dockerDesktop } from './support/docker.ts'
 
 const cfg = loadConfig({ AGENTRY_SANDBOX_DATABASE_URL: 'postgres://x@localhost/x', AGENTRY_SANDBOX_API_KEYS: `sha256:${'a'.repeat(64)}`, AGENTRY_SANDBOX_SECRET: 's'.repeat(32) })
 const OWNER = `test-net-${randomBytes(4).toString('hex')}`
@@ -52,7 +52,8 @@ describe.skipIf(!dockerAvailable)('network guard', () => {
     expect((await sh(a, curlCode('https://example.com'))).stdout).toContain('200')
   })
 
-  it('a sandbox cannot reach a real listener on the host, while an unguarded container can (I7)', async () => {
+  // Docker Desktop only: relies on host.docker.internal resolving (not on native Linux).
+  it.runIf(dockerDesktop)('a sandbox cannot reach a real listener on the host, while an unguarded container can (I7)', async () => {
     const listener = http.createServer((_q, r) => r.end('reached'))
     await new Promise<void>((r) => listener.listen(0, '0.0.0.0', r))
     const port = (listener.address() as AddressInfo).port
@@ -60,14 +61,15 @@ describe.skipIf(!dockerAvailable)('network guard', () => {
       const probe = `curl -s -o /dev/null --max-time 5 -w '%{http_code}' http://host.docker.internal:${String(port)}/; echo " exit=$?"`
       const guarded = (await sh(a, probe)).stdout
       expect(guarded).toContain('exit=28')
-      const control = await runOnce('agentry/sandbox:1', ['sh', '-c', probe])
+      const control = await runOnce('ghcr.io/fakhrulfaiz/agentry-sandbox:1', ['sh', '-c', probe])
       expect(control.output).toContain('200')
     } finally {
       listener.close()
     }
   })
 
-  it("a sandbox cannot reach a sibling's published envd port through the host (I7)", async () => {
+  // Docker Desktop only: relies on host.docker.internal resolving (not on native Linux).
+  it.runIf(dockerDesktop)("a sandbox cannot reach a sibling's published envd port through the host (I7)", async () => {
     const port = (await docker().getContainer(b.handle.containerId!).inspect()).NetworkSettings.Ports['49983/tcp']?.[0]?.HostPort
     const probe = `curl -s -o /dev/null --max-time 5 -w '%{http_code}' http://host.docker.internal:${String(port)}/health; echo " exit=$?"`
     expect((await sh(a, probe)).stdout).toContain('exit=28')

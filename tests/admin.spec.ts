@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createSandboxService, validateLimits } from '../src/sandboxes.ts'
+import { readFileSync } from 'node:fs'
+import { createFakeDriver } from '../src/places/drivers/fake.ts'
 import { startTestService, type TestService } from '../src/testing.ts'
 
 const adminKey = randomBytes(16).toString('hex')
@@ -32,6 +34,13 @@ describe('admin surface', () => {
     expect((await admin(svc, '/v1/admin/overview')).status).toBe(200)
   })
 
+  it('offers the SSH machine place kind with its no-isolation warning', async () => {
+    svc = await startTestService(ADMIN)
+    const html = await (await fetch(`${svc.url}/admin`)).text()
+    expect(html).toContain('value="ssh-machine">Machine over SSH')
+    expect(html).toContain('No isolation between sandboxes. Requires passwordless sudo and iptables.')
+  })
+
   it('lists every owner and starts, stops and deletes any sandbox', async () => {
     svc = await startTestService(ADMIN)
     const a = await (await asOwner(svc, 'alice', '/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'a1' }) })).json() as { id: string }
@@ -61,7 +70,7 @@ describe('admin surface', () => {
     for (const n of [1, 2]) expect((await asOwner(svc, 'vip', '/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: `v${n}` }) })).status).toBe(201)
 
     // A restart (a new service over the same store) reads the saved overrides back.
-    const again = createSandboxService({ store: svc.store, backend: svc.backend, config: svc.config })
+    const again = createSandboxService({ store: svc.store, places: svc.places, config: svc.config, provision: async (_d, _i, h) => h })
     await again.loadSettings()
     expect(again.limits().maxPerOwner).toBe(1)
 
@@ -79,5 +88,55 @@ describe('admin surface', () => {
     expect(() => validateLimits({ nope: 1 })).toThrow(/not a limit/)
     expect(() => validateLimits({ owners: { bob: { maxTotal: 3 } } })).toThrow(/not a per-owner limit/)
     expect(validateLimits({ maxCpus: 1.5, owners: { bob: { maxRunningPerOwner: 0 } } })).toEqual({ maxCpus: 1.5, owners: { bob: { maxRunningPerOwner: 0 } } })
+  })
+})
+
+const KEY = 'SHA256:' + 'A'.repeat(43)
+const fakeKind = () => ({ 'fake-ssh': () => Object.assign(createFakeDriver(), { kind: 'fake-ssh', observedHostKey: () => KEY }) })
+const post = (s: TestService, path: string, body: unknown, method = 'POST') => admin(s, path, { method, body: JSON.stringify(body) })
+
+describe('admin places', () => {
+  it('admin create never echoes secrets', async () => {
+    svc = await startTestService(ADMIN, undefined, fakeKind())
+    const tested = await (await post(svc, '/v1/admin/places/test', { kind: 'fake-ssh', config: { url: 'ssh://u@h' }, secrets: { private_key: 'TOPSECRET' } })).json()
+    expect(tested).toMatchObject({ ok: true, host_key: KEY })
+    const r = await post(svc, '/v1/admin/places', { name: 'Box', kind: 'fake-ssh', config: { url: 'ssh://u@h' }, secrets: { private_key: 'TOPSECRET' }, host_key: KEY })
+    expect(r.status).toBe(201)
+    const text = JSON.stringify(await r.json())
+    expect(text).not.toContain('TOPSECRET')
+    expect(JSON.parse(text)).toMatchObject({ name: 'Box', kind: 'fake-ssh', has_secrets: true, config: { host_key: KEY }, available: true, sandboxes: 0 })
+    const listed = await (await admin(svc, '/v1/admin/places')).text()
+    expect(listed).not.toContain('TOPSECRET')
+    expect(JSON.parse(listed).data.map((p: { id: string }) => p.id)).toContain('local')
+    const stored = await svc.store.places.list()
+    expect(JSON.stringify(stored)).not.toContain('TOPSECRET')
+    expect((await post(svc, '/v1/admin/places', { name: 'X', kind: 'nope', config: {} })).status).toBe(400)
+  })
+
+  it('admin delete of a place with sandboxes answers 409 place_in_use', async () => {
+    svc = await startTestService(ADMIN, undefined, fakeKind())
+    const created = await (await post(svc, '/v1/admin/places', { name: 'Box', kind: 'fake-ssh', config: {} })).json() as { id: string }
+    const sbx = await asOwner(svc, 'alice', '/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 's', place: created.id }) })
+    expect(sbx.status).toBe(201)
+    const id = ((await sbx.json()) as { id: string }).id
+    const refused = await admin(svc, `/v1/admin/places/${created.id}`, { method: 'DELETE' })
+    expect(refused.status).toBe(409)
+    expect(((await refused.json()) as { error: { code: string } }).error.code).toBe('place_in_use')
+    await asOwner(svc, 'alice', `/v1/sandboxes/${id}`, { method: 'DELETE' })
+    expect((await admin(svc, `/v1/admin/places/${created.id}`, { method: 'DELETE' })).status).toBe(200)
+  })
+
+  it('admin cannot delete local', async () => {
+    svc = await startTestService(ADMIN)
+    const r = await admin(svc, '/v1/admin/places/local', { method: 'DELETE' })
+    expect(r.status).toBe(400)
+    expect(((await r.json()) as { error: { code: string } }).error.code).toBe('invalid_request')
+  })
+
+  it('admin page has a Places section and an add-place form with a host key confirmation step', async () => {
+    svc = await startTestService(ADMIN)
+    const html = await (await fetch(`${svc.url}/admin`)).text()
+    for (const id of ['id="places"', 'id="place-form"', 'id="place-hostkey-confirm"']) expect(html).toContain(id)
+    expect(readFileSync(new URL('../src/admin/index.html', import.meta.url), 'utf8')).toContain('Docker over SSH')
   })
 })

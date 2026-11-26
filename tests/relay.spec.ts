@@ -1,6 +1,12 @@
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import http from 'node:http'
+import https from 'node:https'
 import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { setRelayTlsForTests } from '../src/http/relay.ts'
 import { envdToken } from '../src/envd/token.ts'
 import { config, startServer, type TestServer } from './support/server.ts'
 
@@ -31,7 +37,66 @@ afterEach(async () => {
 
 const create = async () => ((await (await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'box' }) })).json()) as { id: string }).id
 
+/** A throwaway self-signed certificate for 127.0.0.1, generated now so no key is ever committed; undefined without openssl. */
+function makeTls(): { key: string; cert: string } | undefined {
+  const dir = mkdtempSync(join(tmpdir(), 'relay-tls-'))
+  try {
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=localhost', '-addext', 'subjectAltName=IP:127.0.0.1,DNS:localhost', '-days', '1', '-keyout', join(dir, 'k'), '-out', join(dir, 'c')], { stdio: 'ignore' })
+    return { key: readFileSync(join(dir, 'k'), 'utf8'), cert: readFileSync(join(dir, 'c'), 'utf8') }
+  } catch {
+    return undefined
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+const TLS = makeTls()
+
 describe('envd relay', () => {
+  it('the relay adds driver headers and the driver token upstream only', async () => {
+    const id = await create()
+    s.backend.envdEndpoint = async (h) => ({ baseUrl: (await Promise.resolve(h), `http://127.0.0.1:${String((upstream.address() as AddressInfo).port)}`), token: 'e2b-secret', headers: { 'E2b-Sandbox-Id': 'sbx1', 'E2b-Sandbox-Port': '49983' } })
+    handler = (_req, res) => res.writeHead(200, { 'content-type': 'text/plain' }).end('ok')
+    const r = await s.call(`/v1/sandboxes/${id}/envd/health`, { headers: { 'E2b-Sandbox-Id': 'forged', 'X-Access-Token': 'forged' } })
+    expect(r.status).toBe(200)
+    const h = seen[0]!.headers
+    expect(h['e2b-sandbox-id']).toBe('sbx1')
+    expect(h['e2b-sandbox-port']).toBe('49983')
+    expect(h['x-access-token']).toBe('e2b-secret')
+    for (const [k, v] of r.headers) {
+      expect(k.toLowerCase()).not.toMatch(/e2b|access-token/)
+      expect(v).not.toContain('e2b-secret')
+    }
+    expect(await r.text()).toBe('ok')
+  })
+
+  it.skipIf(!TLS)('the relay reaches an https upstream (needs openssl to make a throwaway certificate)', async () => {
+    const id = await create()
+    const tls = https.createServer({ key: TLS!.key, cert: TLS!.cert }, (req, res) => res.end(`secure ${req.headers['x-access-token'] as string}`))
+    await new Promise<void>((r) => tls.listen(0, '127.0.0.1', r))
+    setRelayTlsForTests({ ca: TLS!.cert })
+    try {
+      s.backend.setEndpoint(`https://127.0.0.1:${String((tls.address() as AddressInfo).port)}`)
+      const r = await s.call(`/v1/sandboxes/${id}/envd/health`)
+      expect(r.status).toBe(200)
+      expect(await r.text()).toBe(`secure ${envdToken(config.secret, id)}`)
+    } finally {
+      setRelayTlsForTests({})
+      tls.closeAllConnections()
+      await new Promise<void>((r) => tls.close(() => r()))
+    }
+  })
+
+  it('the relay releases the tunnel after the response ends', async () => {
+    const id = await create()
+    let released = 0
+    const base = s.backend.envdEndpoint.bind(s.backend)
+    s.backend.envdEndpoint = async (h) => ({ ...(await base(h)), release: () => { released++ } })
+    const r = await s.call(`/v1/sandboxes/${id}/envd/health`)
+    expect(await r.text()).toBe('ok')
+    await new Promise((res) => setTimeout(res, 50))
+    expect(released).toBe(1)
+  })
+
   it('injects the sandbox token and strips caller credentials', async () => {
     const id = await create()
     const r = await s.call(`/v1/sandboxes/${id}/envd/process.Process/List?x=1`, { method: 'POST', body: '{}', headers: { 'X-Access-Token': 'forged', 'X-Envd-User': 'agent', 'connect-protocol-version': '1' } })

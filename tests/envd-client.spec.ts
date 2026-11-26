@@ -1,3 +1,5 @@
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createEnvdClient } from '../src/envd/client.ts'
 import { dockerAvailable } from './support/docker.ts'
@@ -39,5 +41,31 @@ describe.skipIf(!dockerAvailable)('envd client against a real envd', () => {
     const wrong = createEnvdClient({ baseUrl: envd.baseUrl, accessToken: 'wrong' })
     await expect(wrong.filesystem.stat({ path: '/tmp' }, { headers: wrong.userHeaders('root') })).rejects.toThrow()
     await expect(wrong.readFile('/tmp/a.txt', 'root')).rejects.toThrow()
+  })
+})
+
+describe('envd client headers', () => {
+  it('the envd client sends extra headers', async () => {
+    const seen: http.IncomingHttpHeaders[] = []
+    const srv = http.createServer((req, res) => {
+      seen.push(req.headers)
+      res.writeHead(204).end()
+    })
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r))
+    try {
+      const client = createEnvdClient({ baseUrl: `http://127.0.0.1:${String((srv.address() as AddressInfo).port)}`, accessToken: 'tok', headers: { 'E2b-Sandbox-Id': 'sbx1', 'E2b-Sandbox-Port': '49983' } })
+      expect(await client.health()).toBe(true)
+      await client.init({ accessToken: 'tok', defaultUser: 'root', defaultWorkdir: '/' })
+      await client.readFile('/x', 'root').catch(() => undefined)
+      await client.filesystem.stat({ path: '/' }, { headers: client.userHeaders('root') }).catch(() => undefined)
+      expect(seen.length).toBeGreaterThanOrEqual(4)
+      for (const h of seen) {
+        expect(h['e2b-sandbox-id']).toBe('sbx1')
+        expect(h['e2b-sandbox-port']).toBe('49983')
+      }
+    } finally {
+      srv.closeAllConnections()
+      await new Promise<void>((r) => srv.close(() => r()))
+    }
   })
 })

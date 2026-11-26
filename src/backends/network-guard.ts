@@ -13,10 +13,11 @@ import { createHash } from 'node:crypto'
 import type Docker from 'dockerode'
 import type { SandboxConfig } from '../config.ts'
 import type { NetworkGuard } from './types.ts'
+import type { EnsureImage } from '../places/images.ts'
 
 /** Private, link-local, shared, reserved and multicast ranges, plus cloud metadata hosts: sandboxes reach the public internet only. */
 export const BLOCKED_RANGES = ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.168.0.0/16', '198.18.0.0/15', '224.0.0.0/4', '240.0.0.0/4', '168.63.129.16/32']
-export const GUARD_IMAGE = 'agentry/netguard:1'
+export const GUARD_IMAGE = 'ghcr.io/fakhrulfaiz/agentry-netguard:1'
 
 export const ownerNetworkName = (owner: string) => `agentry-sbx-${createHash('sha256').update(owner).digest('hex').slice(0, 12)}`
 
@@ -44,8 +45,9 @@ export interface DockerNetworkGuard extends NetworkGuard {
 /** Owner networks get /24s from this pool, so many owners fit (Docker's defaults hand out whole /16s). */
 export const SUBNET_POOL_PREFIX = '10.213'
 
-export function createNetworkGuard(docker: Docker, config: SandboxConfig): DockerNetworkGuard {
+export function createNetworkGuard(docker: Docker, config: SandboxConfig, ensure?: EnsureImage): DockerNetworkGuard {
   async function helper(script: string): Promise<void> {
+    await ensure?.(GUARD_IMAGE)
     const container = await docker.createContainer({
       Image: GUARD_IMAGE,
       Cmd: [PRELUDE + script],

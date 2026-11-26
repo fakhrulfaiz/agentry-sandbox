@@ -1,6 +1,6 @@
 /** The store contract, run against every Store implementation. */
 import { beforeEach, describe, expect, it } from 'vitest'
-import type { SandboxRecord, Store, TemplateRecord } from '../src/store/types.ts'
+import type { PlaceRecord, SandboxRecord, Store, TemplateRecord } from '../src/store/types.ts'
 
 let n = 0
 export const sandbox = (over: Partial<SandboxRecord> = {}): SandboxRecord => ({
@@ -12,6 +12,7 @@ export const sandbox = (over: Partial<SandboxRecord> = {}): SandboxRecord => ({
   templateId: null,
   state: 'provisioning',
   handle: {},
+  handleSecrets: null,
   error: null,
   createdAt: 1_000 + n,
   startedAt: null,
@@ -25,6 +26,21 @@ const template = (over: Partial<TemplateRecord> = {}): TemplateRecord => ({
   spec: { image: 'python:3.13', setupCommands: ['pip install rich'], files: [{ path: 'a.txt', content: 'x' }], network: false },
   createdAt: 5,
   updatedAt: 5,
+  ...over,
+})
+
+const place = (over: Partial<PlaceRecord> = {}): PlaceRecord => ({
+  id: `plc_${(++n).toString(16).padStart(32, '0')}`,
+  name: 'lab',
+  kind: 'ssh',
+  config: { host: 'h', port: 22, nested: { a: [1, 2] } },
+  secrets: 'c2VhbGVk',
+  enabled: true,
+  isDefault: false,
+  maxRunning: 4,
+  gpus: [{ index: 0, uuid: 'GPU-1', name: 'A100' }],
+  createdAt: 7,
+  updatedAt: 7,
   ...over,
 })
 
@@ -97,6 +113,39 @@ export function storeContract(name: string, make: () => Promise<Store>) {
       expect(u).toMatchObject({ name: 'py', spec: { image: 'python:3.12' }, updatedAt: 6 })
       expect(await store.templates.delete(t.id, 'alice')).toBe(true)
       expect(await store.templates.get(t.id, 'alice')).toBeUndefined()
+    })
+
+    it('places CRUD round-trips config and sealed secrets', async () => {
+      const p = place()
+      await store.places.insert(p)
+      expect(await store.places.get(p.id)).toEqual(p)
+      expect((await store.places.list()).map((x) => x.id)).toContain(p.id)
+      const u = await store.places.update(p.id, { name: 'lab2', config: { host: 'z' }, secrets: null, gpus: null, maxRunning: null, enabled: false, updatedAt: 8 })
+      expect(u).toEqual({ ...p, name: 'lab2', config: { host: 'z' }, secrets: null, gpus: null, maxRunning: null, enabled: false, updatedAt: 8 })
+      expect(await store.places.update('plc_missing', { name: 'x' })).toBeUndefined()
+      expect(await store.places.delete(p.id)).toBe(true)
+      expect(await store.places.delete(p.id)).toBe(false)
+      expect(await store.places.get(p.id)).toBeUndefined()
+    })
+
+    it('only one place isDefault after update sets another default', async () => {
+      const a = place({ isDefault: true })
+      const b = place()
+      await store.places.insert(a)
+      await store.places.insert(b)
+      await store.places.update(b.id, { isDefault: true })
+      expect((await store.places.get(a.id))?.isDefault).toBe(false)
+      expect((await store.places.get(b.id))?.isDefault).toBe(true)
+      expect((await store.places.list()).filter((x) => x.isDefault)).toHaveLength(1)
+    })
+
+    it('sandbox handleSecrets round-trips', async () => {
+      const r = sandbox({ handleSecrets: 'c2VhbGVk' })
+      await store.sandboxes.insert(r)
+      expect((await store.sandboxes.get(r.id, 'alice'))?.handleSecrets).toBe('c2VhbGVk')
+      const u = await store.sandboxes.update(r.id, 'alice', { handleSecrets: 'bmV3' })
+      expect(u?.handleSecrets).toBe('bmV3')
+      expect((await store.sandboxes.update(r.id, 'alice', { handleSecrets: null }))?.handleSecrets).toBeNull()
     })
   })
 }

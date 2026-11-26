@@ -24,11 +24,11 @@ paths:
               schema: { type: object, properties: { ok: { const: true } } }
   /v1/backends:
     get:
-      summary: Backends and their availability
+      summary: Places (enabled ones, default first) and their availability
       parameters: [{ $ref: "#/components/parameters/Owner" }]
       responses:
         "200":
-          description: One entry per backend.
+          description: One entry per enabled place.
           content:
             application/json:
               schema:
@@ -53,6 +53,7 @@ paths:
               properties:
                 name: { type: string, minLength: 1, maxLength: 200 }
                 template_id: { type: string, description: "A stored template; `template` fields override it." }
+                place: { type: string, description: "Id of the place to run on (from /v1/backends); else the template's, else the default place." }
                 template: { $ref: "#/components/schemas/TemplateSpec" }
       responses:
         "201": { $ref: "#/components/responses/Sandbox" }
@@ -197,6 +198,130 @@ paths:
       responses:
         "204": { description: Deleted. }
         "404": { $ref: "#/components/responses/Error" }
+  /v1/admin/places:
+    get:
+      summary: Admin. List places with their state
+      description: Needs an admin key (not an API key).
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Every place.
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { type: array, items: { $ref: "#/components/schemas/AdminPlace" } } } }
+        "401": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Admin. Add a place
+      description: "`host_key` is the fingerprint a successful test returned; it is pinned (SSH kinds only; an `e2b` place needs none)."
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, kind, config]
+              properties:
+                name: { type: string }
+                kind: { enum: [docker-ssh, ssh-machine, e2b] }
+                config: { type: object }
+                secrets: { type: object, additionalProperties: { type: string }, description: Sealed at rest and never returned. }
+                host_key: { type: string, pattern: "^SHA256:" }
+                max_running: { type: [integer, "null"] }
+      responses:
+        "201": { description: The place., content: { application/json: { schema: { $ref: "#/components/schemas/AdminPlace" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+  /v1/admin/places/test:
+    post:
+      summary: Admin. Test a connection without trusting the host key
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, config]
+              properties:
+                kind: { type: string }
+                config: { type: object }
+                secrets: { type: object, additionalProperties: { type: string } }
+      responses:
+        "200":
+          description: The result, with the host key fingerprint seen and the GPUs found.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean }
+                  reason: { type: string }
+                  host_key: { type: string }
+                  gpus: { $ref: "#/components/schemas/Gpus" }
+        "400": { $ref: "#/components/responses/Error" }
+  /v1/admin/places/{id}:
+    put:
+      summary: Admin. Change a place
+      description: "Fields are optional; `secrets` replaces the stored ones when present. `default` can only be set to true."
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                config: { type: object }
+                secrets: { type: object, additionalProperties: { type: string } }
+                host_key: { type: string }
+                enabled: { type: boolean }
+                default: { const: true }
+                max_running: { type: [integer, "null"] }
+      responses:
+        "200": { description: The place., content: { application/json: { schema: { $ref: "#/components/schemas/AdminPlace" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Admin. Delete a place
+      description: "`place_in_use` 409 while it has sandboxes; the `local` place cannot be deleted (400)."
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: Deleted. }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/admin/keys:
+    get:
+      summary: Admin. List owner-bound access keys
+      description: "Never returns a key or its hash."
+      security: [{ bearer: [] }]
+      responses:
+        "200": { description: The keys., content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+    post:
+      summary: Admin. Create an owner-bound access key
+      description: "The key (`ask_...`) is in this response only; it is stored as a hash. It acts as `owner`, on `/v1` and on `/mcp`, whatever X-Agentry-Owner says."
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, owner]
+              properties:
+                name: { type: string }
+                owner: { type: string }
+      responses:
+        "201": { description: The key record with `key`., content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        "400": { $ref: "#/components/responses/Error" }
+  /v1/admin/keys/{id}:
+    delete:
+      summary: Admin. Revoke an access key
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: Revoked. }
+        "404": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     bearer: { type: http, scheme: bearer }
@@ -223,7 +348,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Template" }
     Error:
-      description: "`unauthorized` 401, `owner_required` 400, `invalid_request` 400 (also a template over the per-sandbox CPU or memory maximum), `not_found` 404, `sandbox_failed` 409, `quota_exceeded` 429 (a sandbox, running or creation-rate limit; the message says which), `backend_unavailable` 503."
+      description: "`unauthorized` 401, `owner_required` 400, `invalid_request` 400 (also a template over the per-sandbox CPU or memory maximum), `not_found` 404, `sandbox_failed` 409, `quota_exceeded` 429 (a sandbox, running or creation-rate limit; the message says which), `place_unavailable` 503 (the message names the place), `place_disabled` 409, `gpu_unavailable` 409 (the place has too few free GPUs; the message says how many of how many). Admin routes also use `place_in_use` 409 and `place_host_key_changed` 409."
       content:
         application/json:
           schema:
@@ -257,6 +382,8 @@ components:
           properties:
             cpus: { type: number, minimum: 0.1, maximum: 64 }
             memory_mb: { type: integer, minimum: 128, maximum: 262144 }
+        place: { type: string, description: Id of the place to run on. }
+        gpus: { oneOf: [{ type: integer, minimum: 0 }, { const: all }], description: "GPUs to give the sandbox; the place needs GPU support." }
     Sandbox:
       type: object
       required: [id, object, name, backend, state, image, template, created_at]
@@ -264,7 +391,9 @@ components:
         id: { type: string, pattern: "^sbx_[0-9a-f]{32}$" }
         object: { const: sandbox }
         name: { type: string }
-        backend: { type: string }
+        backend: { type: string, description: Same as `place`. }
+        place: { type: string }
+        gpus: { oneOf: [{ type: integer, minimum: 0 }, { const: all }] }
         state: { enum: [provisioning, running, stopped, failed, deleting] }
         template_id: { type: [string, "null"] }
         image: { type: string }
@@ -283,9 +412,35 @@ components:
         spec: { $ref: "#/components/schemas/TemplateSpec" }
         created_at: { type: integer }
         updated_at: { type: integer }
+    Gpus:
+      type: object
+      properties:
+        count: { type: integer }
+        models: { type: array, items: { type: string } }
+    AdminPlace:
+      type: object
+      description: A place as the admin sees it. Credentials are never returned; `has_secrets` says whether any are stored.
+      required: [id, name, kind, enabled, default, config, has_secrets, available, gpus, sandboxes]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        kind: { enum: [docker, docker-ssh, ssh-machine, e2b] }
+        enabled: { type: boolean }
+        default: { type: boolean }
+        max_running: { type: [integer, "null"] }
+        config: { type: object, description: "Connection settings (for docker-ssh and ssh-machine: `url` and the pinned `host_key`; for e2b: `template`, optional `api_url`, `sandbox_host`, `timeout_s`; the E2B API key is a secret `api_key`)." }
+        has_secrets: { type: boolean }
+        available: { type: boolean }
+        reason: { type: string }
+        gpus: { $ref: "#/components/schemas/Gpus" }
+        sandboxes: { type: integer }
     Backend:
       type: object
       properties:
+        id: { type: string }
+        name: { type: string }
+        default: { type: boolean }
+        gpus: { $ref: "#/components/schemas/Gpus" }
         kind: { type: string }
         available: { type: boolean }
         version: { type: string }
@@ -294,8 +449,14 @@ components:
           type: object
           properties:
             persistent: { type: boolean }
+            reset: { type: boolean }
+            keepFilesOnReset: { type: boolean }
+            isolated: { type: boolean }
             network: { type: boolean }
             resources: { type: boolean }
+            gpu: { type: boolean }
+            envdBuiltIn: { type: boolean }
+            runsAsRoot: { type: boolean }
             templateFields: { type: array, items: { type: string } }
         default_image:
           type: object

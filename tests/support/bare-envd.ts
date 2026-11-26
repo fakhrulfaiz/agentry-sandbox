@@ -2,6 +2,7 @@
 import type Docker from 'dockerode'
 import { docker } from './docker.ts'
 import { envdArchive } from '../../src/backends/envd-binary.ts'
+import { createEnsureImage } from '../../src/places/images.ts'
 
 export interface BareEnvd {
   baseUrl: string
@@ -11,15 +12,17 @@ export interface BareEnvd {
 
 export async function startBareEnvd(image = 'debian:bookworm-slim'): Promise<BareEnvd> {
   const d = docker()
+  const ensure = createEnsureImage(d)
+  await ensure(image)
   const container = await d.createContainer({
     Image: image,
     Entrypoint: ['/opt/agentry/envd', '--isnotfc', '--no-cgroups', '--port', '49983'],
     Cmd: [],
     Labels: { 'agentry.test': 'bare-envd' },
     ExposedPorts: { '49983/tcp': {} },
-    HostConfig: { Init: true, PortBindings: { '49983/tcp': [{ HostIp: '127.0.0.1', HostPort: '' }] } },
+    HostConfig: { Init: true, Tmpfs: { '/workspace': '' }, PortBindings: { '49983/tcp': [{ HostIp: '127.0.0.1', HostPort: '' }] } },
   })
-  await container.putArchive(await envdArchive(d, 'agentry/envd:envd-v0.6.13'), { path: '/' })
+  await container.putArchive(await envdArchive(d, 'ghcr.io/fakhrulfaiz/agentry-envd:envd-v0.6.13', ensure), { path: '/' })
   await container.start()
   const info = await container.inspect()
   const port = info.NetworkSettings.Ports['49983/tcp']?.[0]?.HostPort
