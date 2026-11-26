@@ -10,12 +10,13 @@ import { createDockerSshDriver, dockerSshFactory } from '../src/places/drivers/d
 import { loadConfig } from '../src/config.ts'
 import { startTestService } from '../src/testing.ts'
 import { HostKeyChangedError, createTunnels, fingerprint, parseSshTarget } from '../src/places/ssh.ts'
+import { generateSshKeyPair } from './support/ssh-keys.ts'
 
 const { Server, utils } = ssh2
 
-const hostKeyA = utils.generateKeyPairSync('ed25519')
-const hostKeyB = utils.generateKeyPairSync('ed25519')
-const user = utils.generateKeyPairSync('ed25519')
+const hostKeyA = generateSshKeyPair(utils)
+const hostKeyB = generateSshKeyPair(utils)
+const user = generateSshKeyPair(utils)
 const blobOf = (publicKey: string) => Buffer.from(publicKey.split(/\s+/u)[1]!, 'base64')
 
 interface TestServer {

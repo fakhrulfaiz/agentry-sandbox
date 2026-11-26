@@ -13,13 +13,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import ssh2 from 'ssh2'
 import { fingerprint } from '../../src/places/ssh.ts'
+import { generateSshKeyPair } from './ssh-keys.ts'
 
 const { Server, utils } = ssh2
 const STATUS = utils.sftp.STATUS_CODE
 
-export const hostKey = utils.generateKeyPairSync('ed25519')
-export const otherHostKey = utils.generateKeyPairSync('ed25519')
-export const userKey = utils.generateKeyPairSync('ed25519')
+export const hostKey = generateSshKeyPair(utils)
+export const otherHostKey = generateSshKeyPair(utils)
+export const userKey = generateSshKeyPair(utils)
 export const fpOf = (publicKey: string) => fingerprint(Buffer.from(publicKey.split(/\s+/u)[1]!, 'base64'))
 
 interface Proc {

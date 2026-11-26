@@ -67,6 +67,7 @@ export function createDockerSshDriver(baseConfig: SandboxConfig, place: { target
     },
     observedHostKey: () => observed,
     async close() {
+      await inner.close?.()
       await tunnels?.closeAll()
     },
   }

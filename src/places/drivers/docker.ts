@@ -23,6 +23,8 @@ export const volumeName = (id: string) => `agentry-sbx-${id}-workspace`
 
 /** Docker API calls give up after this; image pulls use a client without a timeout. */
 const DOCKER_TIMEOUT_MS = 60_000
+/** Every relayed request asks for the status; trust a recent `running` instead of inspecting over SSH each time. */
+const STATUS_TTL_MS = 15_000
 
 export function dockerClient(config: SandboxConfig, timeout: number | undefined = DOCKER_TIMEOUT_MS): Docker {
   const t = timeout === undefined ? {} : { timeout }
@@ -83,16 +85,47 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     return gpuCache
   }
 
-  async function envdEndpoint(handle: Handle): Promise<{ baseUrl: string; release?: () => void }> {
+  /** One resolved endpoint per container: callers of `envdEndpoint` share it (and its SSH tunnel) until the machine goes away. */
+  type ResolvedEndpoint = { baseUrl: string; close?: () => void }
+  const endpoints = new Map<string, Promise<ResolvedEndpoint>>()
+  const runningUntil = new Map<string, number>()
+
+  async function resolveEndpoint(handle: Handle): Promise<ResolvedEndpoint> {
     const info = await client.getContainer(handle.containerId!).inspect()
     if (config.envdReach === 'loopback') {
       const port = info.NetworkSettings.Ports?.[ENVD_PORT]?.find((b) => b.HostIp === '127.0.0.1')?.HostPort
       if (!port) throw new Error('envd port is not published on 127.0.0.1')
-      return options.reach ? options.reach(Number(port)) : { baseUrl: `http://127.0.0.1:${port}` }
+      if (!options.reach) return { baseUrl: `http://127.0.0.1:${port}` }
+      const reached = await options.reach(Number(port))
+      return { baseUrl: reached.baseUrl, close: reached.release }
     }
     const ip = info.NetworkSettings.Networks?.[handle.network ?? '']?.IPAddress
     if (!ip) throw new Error('sandbox has no container IP')
     return { baseUrl: `http://${ip}:49983` }
+  }
+
+  async function envdEndpoint(handle: Handle): Promise<{ baseUrl: string; release?: () => void }> {
+    const id = handle.containerId!
+    let pending = endpoints.get(id)
+    if (!pending) {
+      pending = resolveEndpoint(handle)
+      endpoints.set(id, pending)
+      // A failed resolution must not stay cached: the next call may find a restarted container.
+      void pending.catch(() => { if (endpoints.get(id) === pending) endpoints.delete(id) })
+    }
+    const { baseUrl } = await pending
+    // No per-request `release`: the endpoint (and a tunneled reach) belongs to the container, not the caller.
+    return { baseUrl }
+  }
+
+  /** Ends a container's shared reach when the machine is stopped, removed or replaced. */
+  function forgetEndpoint(containerId: string | undefined): void {
+    if (!containerId) return
+    runningUntil.delete(containerId)
+    const pending = endpoints.get(containerId)
+    if (!pending) return
+    endpoints.delete(containerId)
+    void pending.then((ep) => ep.close?.(), () => {})
   }
 
   async function waitHealthy(handle: Handle): Promise<void> {
@@ -255,11 +288,20 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     },
 
     async stop(handle) {
-      await stopContainer(handle.containerId!)
+      try {
+        await stopContainer(handle.containerId!)
+      } finally {
+        forgetEndpoint(handle.containerId)
+      }
     },
 
     async destroy(id, handle, { keepWorkspace }) {
-      await removeAll(handle.containerId ?? containerName(id), keepWorkspace ? undefined : (handle.volume ?? volumeName(id)))
+      const container = handle.containerId ?? containerName(id)
+      try {
+        await removeAll(container, keepWorkspace ? undefined : (handle.volume ?? volumeName(id)))
+      } finally {
+        forgetEndpoint(container)
+      }
     },
 
     async maintain(_id, handle, spec) {
@@ -270,11 +312,23 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
       await network.removeOwnerNetwork?.(owner)
     },
 
+    async close() {
+      for (const id of [...endpoints.keys()]) forgetEndpoint(id)
+    },
+
     async status(handle) {
+      const id = handle.containerId ?? ''
+      if ((runningUntil.get(id) ?? 0) > Date.now()) return 'running'
       try {
-        return (await client.getContainer(handle.containerId!).inspect()).State.Running ? 'running' : 'stopped'
+        const running: boolean = (await client.getContainer(id).inspect()).State.Running
+        if (running) runningUntil.set(id, Date.now() + STATUS_TTL_MS)
+        else runningUntil.delete(id)
+        return running ? 'running' : 'stopped'
       } catch (e) {
-        if (isNotFound(e)) return 'missing'
+        if (isNotFound(e)) {
+          runningUntil.delete(id)
+          return 'missing'
+        }
         throw e
       }
     },
