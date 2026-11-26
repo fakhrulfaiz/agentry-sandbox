@@ -42,6 +42,10 @@ Hardened Docker sandboxes on demand for Agentry agents. Each sandbox is one cont
 
 6. Run in herdr: `hc run --bg --no-parent --outlive-parent --name agentry-sandbox bash scripts/dev.sh`, then `AGENTRY_SANDBOX_KEY=<key> pnpm exec tsx scripts/smoke.ts`. `scripts/dev.sh` reads `AGENTRY_SANDBOX_KEY`, `AGENTRY_SANDBOX_SECRET` and `AGENTRY_SANDBOX_ADMIN_KEY` from the Agentry API's git-ignored `.env` (`~/code/dsh-agents-api/.env`, or `AGENTRY_ENV_FILE`), hashes the keys and finds the database password from the `agentry-postgres` container.
 
+## Run it from the image
+
+`ghcr.io/fakhrulfaiz/agentry-sandbox-service` is the service (distinct from `agentry-sandbox`, the default sandbox base image). `docker/compose.yaml` runs it with its own Postgres on a Linux host: `cp docker/agentry-sandbox.env.example .env`, set `POSTGRES_PASSWORD`, `AGENTRY_SANDBOX_KEY` and `AGENTRY_SANDBOX_SECRET`, then `docker compose -f docker/compose.yaml up -d`. The container mounts the host's Docker socket (the service drives Docker; the sandboxes never get it) and uses the host network; `docker/README.md` explains both. Releases: a merge to `main` with a new `package.json` version publishes the image and a `v<version>` GitHub Release (notes from the `## <version>` section of `CHANGELOG.md`). The Agentry API and Web composes start it with `COMPOSE_PROFILES=sandbox`.
+
 ## Security model
 
 - **Container wall:** default seccomp, `CapDrop: ALL` plus a short list (no `NET_RAW`, `NET_ADMIN`, `SYS_ADMIN`), not privileged, no bind mounts, no Docker socket, pids/cpu/memory limits; gVisor with one setting.

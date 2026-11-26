@@ -1,0 +1,50 @@
+# Agentry Sandbox from the published image, with its own Postgres.
+#
+#   cp agentry-sandbox.env.example .env      # fill it in (Compose reads .env)
+#   docker compose up -d                     # http://127.0.0.1:3090 (admin page: /admin)
+#
+# Linux Docker host. The service drives the host's Docker through its socket (mounted below; the
+# sandboxes it creates never get the socket) and runs on the host network so it can reach each
+# sandbox's envd port on 127.0.0.1 and install the egress rules in the host's network namespace.
+# Update: change AGENTRY_SANDBOX_TAG in .env (or the tag below), then `docker compose pull && docker compose up -d`.
+# Logs: `docker compose logs -f sandbox`. Each GitHub Release attaches this file with its tag pinned.
+name: agentry-sandbox
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agentry
+      POSTGRES_DB: agentry_sandbox
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # The service is on the host network, so it reaches Postgres on this loopback port.
+    ports:
+      - "127.0.0.1:${AGENTRY_SANDBOX_DB_PORT:-55433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentry -d agentry_sandbox"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  sandbox:
+    image: ghcr.io/fakhrulfaiz/agentry-sandbox-service:${AGENTRY_SANDBOX_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    network_mode: host
+    env_file: .env
+    environment:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: ${AGENTRY_SANDBOX_DB_PORT:-55433}
+      # 127.0.0.1 keeps the service to this machine; 0.0.0.0 lets the Agentry API in a container
+      # (http://host.docker.internal:3090) and other machines reach it. Keys are required either way.
+      AGENTRY_SANDBOX_HOST: ${AGENTRY_SANDBOX_HOST:-0.0.0.0}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  postgres-data:
