@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 2026-11-27: Snapshots (spec `2026-11-26-sandbox-next-design.md` section 2; the audit log and metrics are not built, so snapshot events are not audited). `snapshots` table (`migrations/0005_snapshots.sql`, store contract for memory and Postgres, the Postgres path is untested here: no database), generic `workspace` snapshots through envd (`tar` streamed into `AGENTRY_SANDBOX_SNAPSHOT_DIR`, size limit, `.part` then rename, restore empties then unpacks then chowns), the service (`snapshot`, `restore`, `create` with `snapshot`, delete, expiry sweep, per-owner limit, interrupted saves failed at startup), routes and OpenAPI, client methods, an admin Snapshots view with delete, optional driver contract (`snapshot`, `restoreSnapshot`, `createFromSnapshot`, `deleteSnapshot`, `capabilities.snapshots`) and fake-driver support. A workspace snapshot is taken live and lets the sandbox keep running (the sandbox lock is held only to start it).
+
 ## 0.2.0 — 2026-11-28
 
 - 2026-11-28: SSH machines give envd ports from 30000-30599 (was 49300-49899). The old range sat inside Linux's ephemeral range, where a port can be the local end of an outbound connection that the listening-socket check does not see, so envd could fail with EADDRINUSE; the search now stops at 32767. Existing sandboxes keep their recorded port. This also fixes the two `ssh-machine` tests that failed while a dev stack ran.

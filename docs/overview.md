@@ -83,7 +83,7 @@ A key acts only as its owner, on `/v1` as well as `/mcp`. The endpoint calls thi
 
 ## What it does not do
 
-- No SSH or inbound ports into a sandbox, and no snapshots.
+- No SSH or inbound ports into a sandbox. Snapshots are described in the README ("Snapshots").
 - No Daytona or Modal places yet.
 - Machine-over-SSH places are not isolated; E2B resets delete all files.
 - It does not run DeepSeek Harness itself, store chats, or hold user accounts: owners come from the Agentry API.

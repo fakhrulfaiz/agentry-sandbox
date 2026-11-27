@@ -14,12 +14,15 @@
 import { randomBytes } from 'node:crypto'
 import type { Limits, SandboxConfig } from './config.ts'
 import { openSecrets, sealSecrets } from './crypto/secrets.ts'
+import { createEnvdClient, type EnvdClient, type EnvdClientOptions } from './envd/client.ts'
 import { envdToken } from './envd/token.ts'
+import { ensureSnapshotDir, removeSnapshotFile, removeStaleParts, snapshotFile } from './snapshots/files.ts'
+import { restoreWorkspace, saveWorkspace } from './snapshots/workspace-tar.ts'
 import { bootstrap } from './places/bootstrap.ts'
 import { assignGpus } from './places/gpus.ts'
-import { HostKeyChangedError, TransientPlaceError, type Driver, type Handle } from './places/driver.ts'
+import { HostKeyChangedError, TransientPlaceError, type Driver, type Handle, type SnapshotRef } from './places/driver.ts'
 import type { Place, PlaceRegistry } from './places/registry.ts'
-import type { GpuInfo, ProgressUpdate, SandboxRecord, Store, TemplateSpec } from './store/types.ts'
+import type { GpuInfo, ProgressUpdate, SandboxRecord, SnapshotLevel, SnapshotRecord, Store, TemplateSpec } from './store/types.ts'
 
 export class NotFoundError extends Error {
   constructor(what: string) {
@@ -74,6 +77,22 @@ export class GpuUnavailableError extends Error {
   }
 }
 
+/** Generic snapshots are off: no folder to keep them in (HTTP 400 `snapshots_off`). */
+export class SnapshotsOffError extends Error {
+  constructor() {
+    super('Snapshots are off: set AGENTRY_SANDBOX_SNAPSHOT_DIR to a folder on the service host.')
+    this.name = 'SnapshotsOffError'
+  }
+}
+
+/** The snapshot is still saving or failed, so it cannot be used (HTTP 409 `snapshot_not_ready`). */
+export class SnapshotNotReadyError extends Error {
+  constructor(state: string) {
+    super(`The snapshot is ${state}; only a ready snapshot can be restored.`)
+    this.name = 'SnapshotNotReadyError'
+  }
+}
+
 export interface CreateSandbox {
   name: string
   templateId?: string
@@ -81,6 +100,16 @@ export interface CreateSandbox {
   /** Id of the place to run on; else the template's, else the default place. */
   place?: string
   gpus?: number | 'all'
+  /** Id of one of the owner's snapshots to start from. */
+  snapshot?: string
+}
+
+export interface SnapshotInput {
+  name?: string
+  /** Default `workspace`. */
+  level?: SnapshotLevel
+  /** Stop the sandbox for the snapshot and start it again (native snapshots; a generic workspace snapshot reads a running sandbox, so it is taken live). */
+  stopFirst?: boolean
 }
 
 export interface SandboxService {
@@ -111,6 +140,24 @@ export interface SandboxService {
   listEverything(): Promise<SandboxRecord[]>
   /** The owner of a sandbox (admin), or undefined when there is none. */
   ownerOf(id: string): Promise<string | undefined>
+  /** Starts saving a snapshot of a sandbox (returns the `saving` record; the work runs in the background). */
+  snapshot(owner: string, id: string, input?: SnapshotInput): Promise<SnapshotRecord>
+  listSnapshots(owner: string, opts?: { sandboxId?: string }): Promise<SnapshotRecord[]>
+  getSnapshot(owner: string, snapId: string): Promise<SnapshotRecord>
+  /** Removes the snapshot's bytes (or cancels a save in progress) and its record. */
+  deleteSnapshot(owner: string, snapId: string): Promise<void>
+  /** Puts a snapshot back into a sandbox of the same owner. */
+  restore(owner: string, id: string, snapId: string): Promise<SandboxRecord>
+  /** The levels a snapshot of a sandbox on this place can have. */
+  snapshotLevels(placeId: string): SnapshotLevel[]
+  /** Deletes expired snapshots; returns their ids. */
+  sweepSnapshots(): Promise<string[]>
+  /** Startup: saves that were interrupted become failed, leftover partial files are removed. */
+  recoverSnapshots(): Promise<void>
+  /** Every owner's snapshots, newest first (admin). */
+  listEverySnapshot(): Promise<SnapshotRecord[]>
+  /** The owner of a snapshot (admin). */
+  snapshotOwnerOf(snapId: string): Promise<string | undefined>
   /** Test hook: replaces the limits in place. */
   setLimitsForTest?(limits: Partial<Limits>): void
 }
@@ -138,12 +185,18 @@ export function createSandboxService(deps: {
   dshRuntime?: (() => Promise<Buffer>) | null
   /** Replaces the shared bootstrap (tests with no real envd behind the driver). */
   provision?: Provision
+  /** Replaces the envd client (tests with a stand-in that runs commands locally). */
+  envdClient?: (opts: EnvdClientOptions) => EnvdClient
 }): SandboxService {
   const { store, places, config } = deps
   const RUNTIME_REF = config.dshRuntimeImage || 'dsh'
   const provision: Provision =
     deps.provision ?? ((driver, id, handle, spec, progress) => bootstrap(driver, id, handle, spec, { secret: config.secret, dshRuntime: deps.dshRuntime ?? null, startTimeoutMs: config.startTimeoutMs, dshRef: RUNTIME_REF, ...(progress ? { progress } : {}) }))
   const now = deps.now ?? Date.now
+  const makeEnvd = deps.envdClient ?? createEnvdClient
+  const snaps = config.snapshots
+  /** Saves in progress, so a delete can cancel one. */
+  const saving = new Map<string, AbortController>()
   let limits: Limits = { ...config.limits }
   let overrides: Partial<Limits> = {}
   const LIMITS_KEY = 'limits'
@@ -233,9 +286,11 @@ export function createSandboxService(deps: {
   }
 
   /** Runs the driver's create then the shared bootstrap; a failed bootstrap leaves nothing behind. */
-  async function makeMachine(place: Place, r: SandboxRecord, gpuIds: string[], progress: (p: ProgressUpdate) => void): Promise<Handle> {
+  async function makeMachine(place: Place, r: SandboxRecord, gpuIds: string[], progress: (p: ProgressUpdate) => void, from?: SnapshotRef): Promise<Handle> {
     progress({ stage: 'starting' })
-    const handle = await call(place, () => place.driver.create(r.id, r.owner, r.template, { gpuIds, progress, runtimeRef: RUNTIME_REF }))
+    const handle = await call(place, () =>
+      from ? place.driver.createFromSnapshot!(r.id, r.owner, r.template, { gpuIds, progress, runtimeRef: RUNTIME_REF }, from) : place.driver.create(r.id, r.owner, r.template, { gpuIds, progress, runtimeRef: RUNTIME_REF }),
+    )
     try {
       const done = await call(place, () => provision(place.driver, r.id, handle, r.template, progress))
       return withGpus(done, gpuIds)
@@ -340,12 +395,12 @@ export function createSandboxService(deps: {
     }
   }
 
-  async function build(r: SandboxRecord): Promise<SandboxRecord> {
+  async function build(r: SandboxRecord, from?: SnapshotRef): Promise<SandboxRecord> {
     const writer = progressWriter(r)
     try {
       const place = placeOf(r)
       const reserved = await reserveGpus(place, r)
-      const handle = await makeMachine(place, reserved.record, reserved.gpuIds, writer.report)
+      const handle = await makeMachine(place, reserved.record, reserved.gpuIds, writer.report, from)
       await writer.close()
       const t = now()
       return await save(r, { state: 'running', handle, error: null, progress: null, startedAt: t, lastUsedAt: t })
@@ -388,6 +443,191 @@ export function createSandboxService(deps: {
     }
   }
 
+
+  // ---- snapshots ----
+
+  const SNAPSHOT_LEVELS: SnapshotLevel[] = ['workspace', 'disk', 'memory']
+  const nativeLevels = (place: Place): SnapshotLevel[] => place.driver.capabilities.snapshots ?? []
+  const levelsOf = (place: Place): SnapshotLevel[] => SNAPSHOT_LEVELS.filter((l) => nativeLevels(place).includes(l) || (l === 'workspace' && snaps.dir !== null))
+
+  /** Moves a driver's `secret.` keys out of a snapshot handle and seals them. */
+  function sealSnapHandle(h: Handle): { handle: Handle; handleSecrets: string | null } {
+    const secrets: Record<string, string> = {}
+    const rest: Handle = {}
+    for (const [k, v] of Object.entries(h)) {
+      if (k.startsWith(SECRET_PREFIX)) secrets[k.slice(SECRET_PREFIX.length)] = v
+      else rest[k] = v
+    }
+    return { handle: rest, handleSecrets: Object.keys(secrets).length > 0 ? sealSecrets(config.secret, secrets) : null }
+  }
+  const refOf = (s: SnapshotRecord): SnapshotRef => ({
+    id: s.id,
+    level: s.level,
+    handle: s.handleSecrets ? { ...s.handle, ...Object.fromEntries(Object.entries(openSecrets(config.secret, s.handleSecrets)).map(([k, v]) => [SECRET_PREFIX + k, v])) } : s.handle,
+  })
+
+  /** What a call that reads or writes a running sandbox's files through envd needs. */
+  interface EnvdUse {
+    envd: EnvdClient
+    /** The envd user that may read and write the whole workspace. */
+    user: string
+    /** Who owns the workspace files. */
+    agent: string
+    workspace: string
+  }
+  async function envdOf(r: SandboxRecord): Promise<{ use: EnvdUse; release: () => void }> {
+    const place = placeOf(r)
+    const ep = await call(place, () => place.driver.envdEndpoint(dh(r)))
+    const accessToken = ep.token ?? envdToken(config.secret, r.id)
+    const agent = place.driver.agentUser ?? 'agent'
+    return {
+      use: { envd: makeEnvd({ baseUrl: ep.baseUrl, accessToken, ...(ep.headers ? { headers: ep.headers } : {}) }), user: place.driver.capabilities.runsAsRoot ? 'root' : agent, agent, workspace: r.template.workspacePath ?? '/workspace' },
+      release: () => ep.release?.(),
+    }
+  }
+
+  async function stopNow(owner: string, id: string): Promise<SandboxRecord> {
+    const r = await load(owner, id)
+    if (!noMachine(r.handle)) {
+      const place = placeOf(r)
+      await call(place, () => place.driver.stop(dh(r)))
+    }
+    return save(r, { state: 'stopped', handle: withoutGpus(r.handle) })
+  }
+
+  /**
+   * Runs `fn` with the sandbox running and its envd reachable. The sandbox lock is held only to get it running
+   * (so a long copy does not freeze the sandbox's other calls); a sandbox that was stopped is stopped again after.
+   */
+  async function withEnvd<T>(owner: string, id: string, fn: (u: EnvdUse) => Promise<T>): Promise<T> {
+    let end = () => {}
+    const prep = await locked(id, async () => {
+      const wasStopped = (await load(owner, id)).state !== 'running'
+      const r = await doStart(owner, id)
+      const e = await envdOf(r)
+      end = service.beginUse(id)
+      return { ...e, wasStopped }
+    })
+    try {
+      return await fn(prep.use)
+    } finally {
+      prep.release()
+      end()
+      if (prep.wasStopped) await locked(id, () => stopNow(owner, id)).catch(() => {})
+    }
+  }
+
+  /** Removes whatever holds a snapshot's bytes. A place that is gone has nothing we can reach; one that does not answer throws. */
+  async function dropBytes(snap: SnapshotRecord): Promise<void> {
+    if (snap.place === 'service') {
+      if (snaps.dir !== null) await removeSnapshotFile(snaps.dir, snap.id)
+      return
+    }
+    const place = places.get(snap.place)
+    if (!place) {
+      console.warn(`[agentry-sandbox] snapshot ${snap.id} was kept on place ${snap.place}, which is no longer configured; its data was not removed`)
+      return
+    }
+    if (place.driver.deleteSnapshot) await call(place, () => place.driver.deleteSnapshot!(refOf(snap)))
+  }
+
+  async function usableSnapshot(owner: string, snapId: string): Promise<SnapshotRecord> {
+    const snap = await store.snapshots.get(snapId, owner)
+    if (!snap) throw new NotFoundError('snapshot')
+    if (snap.state !== 'ready') throw new SnapshotNotReadyError(snap.state)
+    return snap
+  }
+
+  /** Extracts a generic snapshot into a running sandbox. */
+  async function extractInto(r: SandboxRecord, snap: SnapshotRecord, clear: boolean): Promise<void> {
+    if (snaps.dir === null) throw new SnapshotsOffError()
+    const { use, release } = await envdOf(r)
+    try {
+      await restoreWorkspace(use.envd, { user: use.user, workspace: use.workspace, file: snapshotFile(snaps.dir, snap.id), owner: use.agent, clear })
+    } finally {
+      release()
+    }
+  }
+
+  async function takeNative(owner: string, sandboxId: string, rec: SnapshotRecord, stopFirst: boolean): Promise<{ handle: Handle; sizeBytes?: number }> {
+    const run = async () => {
+      const r = await load(owner, sandboxId)
+      const place = placeOf(r)
+      return call(place, () => place.driver.snapshot!(r.id, dh(r), r.template, { snapId: rec.id, level: rec.level, name: rec.name }))
+    }
+    if (stopFirst) {
+      return locked(sandboxId, async () => {
+        const wasRunning = (await load(owner, sandboxId)).state === 'running'
+        if (wasRunning) await stopNow(owner, sandboxId)
+        try {
+          return await run()
+        } finally {
+          if (wasRunning) await doStart(owner, sandboxId).catch(() => {})
+        }
+      })
+    }
+    const end = service.beginUse(sandboxId)
+    try {
+      return await run()
+    } finally {
+      end()
+    }
+  }
+
+  /** The background half of `snapshot`: takes it, then marks the record ready or failed. */
+  async function runSnapshot(rec: SnapshotRecord, generic: boolean, stopFirst: boolean, signal: AbortSignal): Promise<void> {
+    const { owner, sandboxId } = rec
+    try {
+      let out: { handle: Handle; sizeBytes?: number }
+      if (generic) {
+        const dir = snaps.dir!
+        const bytes = await withEnvd(owner, sandboxId, (u) => saveWorkspace(u.envd, { user: u.user, workspace: u.workspace, file: snapshotFile(dir, rec.id), maxBytes: snaps.maxBytes, signal }))
+        out = { handle: { file: `${rec.id}.tar.gz` }, sizeBytes: bytes }
+      } else {
+        out = await takeNative(owner, sandboxId, rec, stopFirst)
+      }
+      const sealed = sealSnapHandle(out.handle)
+      const done = await store.snapshots.update(rec.id, owner, { state: 'ready', handle: sealed.handle, handleSecrets: sealed.handleSecrets, sizeBytes: out.sizeBytes ?? null, error: null })
+      // Deleted while it was being taken: nothing refers to the bytes any more.
+      if (!done) await dropBytes({ ...rec, handle: sealed.handle, handleSecrets: sealed.handleSecrets }).catch(() => {})
+    } catch (e) {
+      if (generic) await removeSnapshotFile(snaps.dir!, rec.id).catch(() => {})
+      await store.snapshots.update(rec.id, owner, { state: 'failed', error: message(e).slice(0, 500) }).catch(() => {})
+    }
+  }
+
+  async function restoreGeneric(r: SandboxRecord, snap: SnapshotRecord): Promise<SandboxRecord> {
+    if (snaps.dir === null) throw new SnapshotsOffError()
+    const wasStopped = r.state !== 'running'
+    const running = await doStart(r.owner, r.id)
+    try {
+      await extractInto(running, snap, true)
+    } finally {
+      if (wasStopped) await stopNow(r.owner, r.id).catch(() => {})
+    }
+    return save(await load(r.owner, r.id), { lastUsedAt: now() })
+  }
+
+  async function restoreNative(r: SandboxRecord, snap: SnapshotRecord): Promise<SandboxRecord> {
+    const place = placeOf(r)
+    if (snap.place !== r.backend) throw new LimitError(`this ${snap.level} snapshot is kept on place '${snap.place}'; it can only be restored into a sandbox there`)
+    if (!place.driver.restoreSnapshot) throw new LimitError(`place '${place.name}' cannot restore ${snap.level} snapshots`)
+    await mustAvailable(place)
+    await checkRunning(r.owner, place, r.id)
+    let current = r
+    try {
+      const reserved = await reserveGpus(place, r)
+      current = reserved.record
+      const restored = await call(place, () => place.driver.restoreSnapshot!(r.id, dh(r), r.template, refOf(snap), { gpuIds: reserved.gpuIds }))
+      const handle = await call(place, () => provision(place.driver, r.id, restored, r.template))
+      const t = now()
+      return await save(current, { state: 'running', handle: withGpus(handle, reserved.gpuIds), error: null, startedAt: t, lastUsedAt: t })
+    } catch (e) {
+      await store.sandboxes.update(r.id, r.owner, { state: 'failed', error: message(e), handle: {} })
+      throw e
+    }
+  }
+
   /** Logs what a forgotten sandbox may have left on its place (ids only, never credentials). */
   function forgotten(r: SandboxRecord, why: string): void {
     const left = Object.entries(r.handle).filter(([k]) => k === 'containerId' || k === 'volume').map(([k, v]) => `${k}=${v}`).join(' ')
@@ -425,7 +665,7 @@ export function createSandboxService(deps: {
     return stopped
   }
 
-  return {
+  const service: SandboxService = {
     async create(owner, input) {
       let template: TemplateSpec = input.template ?? {}
       let templateId: string | null = null
@@ -435,9 +675,23 @@ export function createSandboxService(deps: {
         template = { ...t.spec, ...input.template }
         templateId = t.id
       }
-      const placeId = input.place ?? template.place ?? places.default().id
+      // Starting from a snapshot: a generic one (files only) goes on any place; a native one only where it was taken.
+      let from: SnapshotRecord | undefined
+      if (input.snapshot !== undefined) {
+        from = await usableSnapshot(owner, input.snapshot)
+        if (from.place === 'service') {
+          if (snaps.dir === null) throw new SnapshotsOffError()
+        } else {
+          const asked = input.place ?? template.place
+          if (asked !== undefined && asked !== from.place) throw new LimitError(`this ${from.level} snapshot is kept on place '${from.place}'; a sandbox made from it must run there`)
+          const source = await store.sandboxes.get(from.sandboxId, owner)
+          template = { ...(source?.template ?? {}), ...template }
+        }
+      }
+      const placeId = input.place ?? template.place ?? (from && from.place !== 'service' ? from.place : places.default().id)
       const place = places.get(placeId)
       if (!place) throw new LimitError(`no place '${placeId}'`)
+      if (from && from.place !== 'service' && !place.driver.createFromSnapshot) throw new LimitError(`place '${place.name}' cannot start a sandbox from a ${from.level} snapshot`)
       const gpus = input.gpus ?? template.gpus
       template = { ...template, place: placeId, ...(gpus !== undefined ? { gpus } : {}) }
       const allowed = place.driver.capabilities.templateFields
@@ -471,7 +725,10 @@ export function createSandboxService(deps: {
       // so a kept failed record would only count against the owner's limits.
       return locked(record.id, async () => {
         try {
-          return await build(record)
+          const built = await build(record, from && from.place !== 'service' ? refOf(from) : undefined)
+          // A generic snapshot's files go over the template's (it set the sandbox up first).
+          if (from && from.place === 'service') await extractInto(built, from, false)
+          return built
         } catch (e) {
           // The backend cleans up a create it could not finish; this also covers one that died half-way.
           await place.driver.destroy(record.id, {}, { keepWorkspace: false }).catch(() => {})
@@ -489,14 +746,7 @@ export function createSandboxService(deps: {
     },
 
     stop(owner, id) {
-      return locked(id, async () => {
-        const r = await load(owner, id)
-        if (!noMachine(r.handle)) {
-          const place = placeOf(r)
-          await call(place, () => place.driver.stop(dh(r)))
-        }
-        return save(r, { state: 'stopped', handle: withoutGpus(r.handle) })
-      })
+      return locked(id, () => stopNow(owner, id))
     },
 
     reset(owner, id, { keepWorkspace }) {
@@ -642,10 +892,111 @@ export function createSandboxService(deps: {
       return (await store.sandboxes.getAny(id))?.owner
     },
 
+    async snapshot(owner, id, input = {}) {
+      const r = await load(owner, id)
+      const level = input.level ?? 'workspace'
+      if (!SNAPSHOT_LEVELS.includes(level)) throw new LimitError(`level must be one of ${SNAPSHOT_LEVELS.join(', ')}`)
+      const place = placeOf(r)
+      const generic = level === 'workspace' && snaps.dir !== null
+      if (!generic && !nativeLevels(place).includes(level)) {
+        if (level === 'workspace') throw new SnapshotsOffError()
+        const can = levelsOf(place)
+        throw new LimitError(`place '${place.name}' cannot take ${level} snapshots${can.length > 0 ? ` (it can take: ${can.join(', ')})` : ''}`)
+      }
+      const mine = (await store.snapshots.list(owner)).filter((x) => x.state !== 'failed').length
+      if (mine >= snaps.maxPerOwner) throw new QuotaExceededError(`You already have ${String(mine)} snapshots (limit ${String(snaps.maxPerOwner)}). Delete one first.`)
+      const t = now()
+      const rec: SnapshotRecord = {
+        id: `snap_${randomBytes(16).toString('hex')}`,
+        owner,
+        sandboxId: id,
+        place: generic ? 'service' : place.id,
+        level,
+        name: input.name?.trim() || `${r.name} ${new Date(t).toISOString().slice(0, 16).replace('T', ' ')}`,
+        state: 'saving',
+        handle: {},
+        handleSecrets: null,
+        sizeBytes: null,
+        error: null,
+        createdAt: t,
+        expiresAt: snaps.days > 0 ? t + snaps.days * 86_400_000 : null,
+      }
+      if (generic) await ensureSnapshotDir(snaps.dir!)
+      await store.snapshots.insert(rec)
+      const abort = new AbortController()
+      saving.set(rec.id, abort)
+      void runSnapshot(rec, generic, input.stopFirst === true, abort.signal).finally(() => saving.delete(rec.id))
+      return rec
+    },
+
+    listSnapshots: (owner, opts) => store.snapshots.list(owner, opts),
+
+    async getSnapshot(owner, snapId) {
+      const snap = await store.snapshots.get(snapId, owner)
+      if (!snap) throw new NotFoundError('snapshot')
+      return snap
+    },
+
+    async deleteSnapshot(owner, snapId) {
+      const snap = await store.snapshots.get(snapId, owner)
+      if (!snap) throw new NotFoundError('snapshot')
+      saving.get(snapId)?.abort()
+      await dropBytes(snap)
+      await store.snapshots.delete(snapId, owner)
+    },
+
+    restore(owner, id, snapId) {
+      return locked(id, async () => {
+        const r = await load(owner, id)
+        const snap = await usableSnapshot(owner, snapId)
+        return snap.place === 'service' ? restoreGeneric(r, snap) : restoreNative(r, snap)
+      })
+    },
+
+    snapshotLevels(placeId) {
+      const place = places.get(placeId)
+      return place ? levelsOf(place) : []
+    },
+
+    async sweepSnapshots() {
+      const gone: string[] = []
+      for (const snap of await store.snapshots.listExpired(now())) {
+        if (snap.state === 'saving') continue
+        try {
+          await dropBytes(snap)
+          await store.snapshots.delete(snap.id, snap.owner)
+          gone.push(snap.id)
+        } catch (e) {
+          console.warn(`[agentry-sandbox] could not remove expired snapshot ${snap.id}: ${message(e)}`)
+        }
+      }
+      return gone
+    },
+
+    async recoverSnapshots() {
+      if (snaps.dir !== null) {
+        await ensureSnapshotDir(snaps.dir)
+        await removeStaleParts(snaps.dir)
+      }
+      for (const snap of await store.snapshots.listAll()) {
+        if (snap.state !== 'saving' || saving.has(snap.id)) continue
+        await store.snapshots.update(snap.id, snap.owner, { state: 'failed', error: 'the service restarted while the snapshot was being taken' })
+      }
+    },
+
+    async listEverySnapshot() {
+      return (await store.snapshots.listAll()).sort((a, b) => b.createdAt - a.createdAt)
+    },
+
+    async snapshotOwnerOf(snapId) {
+      return (await store.snapshots.getAny(snapId))?.owner
+    },
+
     setLimitsForTest(next) {
       limits = { ...limits, ...next }
     },
   }
+  return service
 }
 
 const COUNT_KEYS = ['maxPerOwner', 'maxRunningPerOwner', 'maxTotal', 'maxRunningTotal', 'maxCreatesPerHour'] as const

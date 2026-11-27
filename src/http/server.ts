@@ -13,8 +13,8 @@ import { openSecrets, sealSecrets } from '../crypto/secrets.ts'
 import { HostKeyChangedError, type Driver } from '../places/driver.ts'
 import { LOCAL_PLACE_ID, type PlaceRegistry, type ProbeResult } from '../places/registry.ts'
 import type { SandboxConfig } from '../config.ts'
-import { GpuUnavailableError, LimitError, NotFoundError, PlaceDisabledError, PlaceUnavailableError, QuotaExceededError, type SandboxService } from '../sandboxes.ts'
-import type { GpuInfo, PlaceRecord, Progress, SandboxRecord, Store, TemplateRecord, TemplateSpec } from '../store/types.ts'
+import { GpuUnavailableError, LimitError, NotFoundError, PlaceDisabledError, PlaceUnavailableError, QuotaExceededError, SnapshotNotReadyError, SnapshotsOffError, type SandboxService } from '../sandboxes.ts'
+import type { GpuInfo, PlaceRecord, Progress, SandboxRecord, SnapshotLevel, SnapshotRecord, Store, TemplateRecord, TemplateSpec } from '../store/types.ts'
 import { handleMcp } from '../mcp/handler.ts'
 import { createOwnerKeys, keyToWire } from './owner-keys.ts'
 import { relay } from './relay.ts'
@@ -156,6 +156,33 @@ const sandboxToWire = (r: SandboxRecord, defaultImage: string) => ({
   last_used_at: sec(r.lastUsedAt),
 })
 
+/** A snapshot as the API shows it. Where it is kept and its provider handle stay inside the service. */
+const snapshotToWire = (s: SnapshotRecord) => ({
+  id: s.id,
+  object: 'snapshot',
+  sandbox_id: s.sandboxId,
+  place: s.place,
+  level: s.level,
+  name: s.name,
+  state: s.state,
+  size_bytes: s.sizeBytes,
+  error: s.error,
+  created_at: sec(s.createdAt),
+  expires_at: sec(s.expiresAt),
+})
+
+const LEVELS: SnapshotLevel[] = ['workspace', 'disk', 'memory']
+function snapshotInputFromWire(b: Record<string, unknown>): { name?: string; level?: SnapshotLevel; stopFirst?: boolean } {
+  if (b.name !== undefined && (typeof b.name !== 'string' || b.name.length > 200)) throw invalid('name must be a string of at most 200 characters')
+  if (b.level !== undefined && !LEVELS.includes(b.level as SnapshotLevel)) throw invalid(`level must be one of ${LEVELS.join(', ')}`)
+  if (b.stop_first !== undefined && typeof b.stop_first !== 'boolean') throw invalid('stop_first must be true or false')
+  return { ...(typeof b.name === 'string' ? { name: b.name } : {}), ...(b.level !== undefined ? { level: b.level as SnapshotLevel } : {}), ...(b.stop_first !== undefined ? { stopFirst: b.stop_first } : {}) }
+}
+const snapshotIdFromWire = (v: unknown, field: string): string => {
+  if (typeof v !== 'string' || !/^snap_[0-9a-f]{32}$/.test(v)) throw invalid(`${field} must be a snapshot id`)
+  return v
+}
+
 const templateRecordToWire = (t: TemplateRecord) => ({ id: t.id, object: 'template', name: t.name, spec: templateToWire(t.spec), created_at: sec(t.createdAt), updated_at: sec(t.updatedAt) })
 
 const gpusWire = (gpus: GpuInfo[] | undefined) => ({ count: gpus?.length ?? 0, models: [...new Set((gpus ?? []).map((g) => g.name))] })
@@ -199,6 +226,11 @@ export const ROUTES: Route[] = [
   { method: 'POST', openapi: '/v1/sandboxes/{id}/start' },
   { method: 'POST', openapi: '/v1/sandboxes/{id}/stop' },
   { method: 'POST', openapi: '/v1/sandboxes/{id}/reset' },
+  { method: 'POST', openapi: '/v1/sandboxes/{id}/snapshots' },
+  { method: 'POST', openapi: '/v1/sandboxes/{id}/restore' },
+  { method: 'GET', openapi: '/v1/snapshots' },
+  { method: 'GET', openapi: '/v1/snapshots/{id}' },
+  { method: 'DELETE', openapi: '/v1/snapshots/{id}' },
   { method: 'GET', openapi: '/v1/sandboxes/{id}/envd/{path}' },
   { method: 'POST', openapi: '/v1/sandboxes/{id}/envd/{path}' },
   { method: 'POST', openapi: '/v1/templates' },
@@ -214,6 +246,8 @@ export const ROUTES: Route[] = [
   { method: 'GET', openapi: '/v1/admin/keys' },
   { method: 'POST', openapi: '/v1/admin/keys' },
   { method: 'DELETE', openapi: '/v1/admin/keys/{id}' },
+  { method: 'GET', openapi: '/v1/admin/snapshots' },
+  { method: 'DELETE', openapi: '/v1/admin/snapshots/{id}' },
 ]
 
 const MAX_BODY = 1024 * 1024
@@ -467,6 +501,15 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
       if (action === 'start' && method === 'POST') return { status: 200, body: { ...sandboxToWire(await service.start(owner, id), config.defaultImage), owner } }
       if (action === 'stop' && method === 'POST') return { status: 200, body: { ...sandboxToWire(await service.stop(owner, id), config.defaultImage), owner } }
     }
+    if (a === 'snapshots') {
+      if (!id && method === 'GET') return { status: 200, body: list((await service.listEverySnapshot()).map((x) => ({ ...snapshotToWire(x), owner: x.owner }))) }
+      const owner = id ? await service.snapshotOwnerOf(id) : undefined
+      if (!id || owner === undefined) throw new NotFoundError('snapshot')
+      if (method === 'DELETE') {
+        await service.deleteSnapshot(owner, id)
+        return { status: 200, body: { id, object: 'snapshot.deleted', deleted: true } }
+      }
+    }
     if (a === 'keys') {
       if (!id && method === 'GET') return { status: 200, body: list((await ownerKeys.list()).map(keyToWire)) }
       if (!id && method === 'POST') {
@@ -511,7 +554,7 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
     return body.name.trim()
   }
 
-  async function dispatch(method: string, path: string, ctx: Ctx): Promise<Result> {
+  async function dispatch(method: string, path: string, ctx: Ctx, query: URLSearchParams): Promise<Result> {
     const seg = path.split('/').filter(Boolean)
     if (seg[0] !== 'v1') throw new HttpError(404, 'not_found', 'route not found')
     const [, a, id, action, ...rest] = seg
@@ -522,7 +565,7 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
         const gpus = probed.ok && probed.gpus && probed.gpus.length > 0 ? probed.gpus : p.gpus
         return {
           id: p.id, name: p.name, default: p.isDefault, kind: p.kind, available: probed.ok, ...(probed.ok ? { version: probed.version } : { reason: probed.reason }),
-          ...(gpus.length > 0 ? { gpus: gpusWire(gpus) } : {}), capabilities: p.driver.capabilities,
+          ...(gpus.length > 0 ? { gpus: gpusWire(gpus) } : {}), capabilities: p.driver.capabilities, snapshots: service.snapshotLevels(p.id),
           default_image: { name: config.defaultImage, ...(info ?? {}) },
         }
       }))
@@ -538,7 +581,8 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
           const workspacePath = workspacePathFromWire(body.workspace_path)
           const template = { ...templateFromWire(body.template), ...(workspacePath ? { workspacePath } : {}) }
           const place = body.place === undefined ? undefined : placeIdFromWire(body.place, 'place')
-          const r = await service.create(ctx.owner, { name: name(body), ...(templateId ? { templateId } : {}), ...(place ? { place } : {}), template })
+          const snapshot = body.snapshot === undefined ? undefined : snapshotIdFromWire(body.snapshot, 'snapshot')
+          const r = await service.create(ctx.owner, { name: name(body), ...(templateId ? { templateId } : {}), ...(place ? { place } : {}), ...(snapshot ? { snapshot } : {}), template })
           return { status: 201, body: sandboxToWire(r, config.defaultImage) }
         }
       } else if (!action) {
@@ -550,12 +594,28 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
       } else if (action === 'envd') {
         await relay(service, ctx.owner, id, rest.join('/'), ctx.req, ctx.res)
         return 'handled'
+      } else if (method === 'POST' && action === 'snapshots' && rest.length === 0) {
+        return { status: 202, body: snapshotToWire(await service.snapshot(ctx.owner, id, snapshotInputFromWire(await ctx.body()))) }
+      } else if (method === 'POST' && action === 'restore' && rest.length === 0) {
+        const snapshot = snapshotIdFromWire((await ctx.body()).snapshot, 'snapshot')
+        return { status: 200, body: sandboxToWire(await service.restore(ctx.owner, id, snapshot), config.defaultImage) }
       } else if (method === 'POST' && (action === 'start' || action === 'stop' || action === 'reset') && rest.length === 0) {
         if (action === 'start') return { status: 200, body: sandboxToWire(await service.start(ctx.owner, id), config.defaultImage) }
         if (action === 'stop') return { status: 200, body: sandboxToWire(await service.stop(ctx.owner, id), config.defaultImage) }
         const body = await ctx.body()
         if (body.keep_workspace !== undefined && typeof body.keep_workspace !== 'boolean') throw invalid('keep_workspace must be true or false')
         return { status: 200, body: sandboxToWire(await service.reset(ctx.owner, id, { keepWorkspace: body.keep_workspace !== false }), config.defaultImage) }
+      }
+    }
+    if (a === 'snapshots' && !action) {
+      if (!id && method === 'GET') {
+        const sandbox = query.get('sandbox')
+        return { status: 200, body: list((await service.listSnapshots(ctx.owner, sandbox ? { sandboxId: sandbox } : {})).map(snapshotToWire)) }
+      }
+      if (id && method === 'GET') return { status: 200, body: snapshotToWire(await service.getSnapshot(ctx.owner, id)) }
+      if (id && method === 'DELETE') {
+        await service.deleteSnapshot(ctx.owner, id)
+        return { status: 204 }
       }
     }
     if (a === 'templates' && !action) {
@@ -643,7 +703,7 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
           owner = bound
         }
         let parsed: Promise<Record<string, unknown>> | undefined
-        const result = await dispatch(method, url.pathname, { owner, body: () => (parsed ??= readJson(req)), req, res })
+        const result = await dispatch(method, url.pathname, { owner, body: () => (parsed ??= readJson(req)), req, res }, url.searchParams)
         if (result !== 'handled') send(res, result.status, result.body)
       } catch (e) {
         if (e instanceof HttpError) return fail(res, e.status, e.code, e.message)
@@ -654,6 +714,8 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
         if (e instanceof PlaceDisabledError) return fail(res, 409, 'place_disabled', e.message)
         if (e instanceof GpuUnavailableError) return fail(res, 409, 'gpu_unavailable', e.message)
         if (e instanceof QuotaExceededError) return fail(res, 429, 'quota_exceeded', e.message)
+        if (e instanceof SnapshotsOffError) return fail(res, 400, 'snapshots_off', e.message)
+        if (e instanceof SnapshotNotReadyError) return fail(res, 409, 'snapshot_not_ready', e.message)
         if (e instanceof LimitError) return fail(res, 400, 'invalid_request', e.message)
         const msg = e instanceof Error ? e.message : String(e)
         if (/sandbox/.test(url.pathname)) return fail(res, 409, 'sandbox_failed', msg)

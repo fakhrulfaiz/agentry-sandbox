@@ -3,7 +3,7 @@
  * makes the machine and gets envd reachable; the shared bootstrap
  * (`bootstrap.ts`) then provisions it the same way for every kind.
  */
-import type { GpuInfo, ProgressUpdate, TemplateSpec } from '../store/types.ts'
+import type { GpuInfo, ProgressUpdate, SnapshotLevel, TemplateSpec } from '../store/types.ts'
 
 /**
  * A driver's record of one machine. Keys starting with `secret.` hold credentials (E2B's envd token): the
@@ -23,6 +23,11 @@ export interface Capabilities {
   envdBuiltIn: boolean
   runsAsRoot: boolean
   templateFields: (keyof TemplateSpec)[]
+  /**
+   * The snapshot levels this place does natively. The service adds the generic `workspace` snapshot (through envd,
+   * kept on the service host) for every place, so a driver lists only what it does itself. Absent: none.
+   */
+  snapshots?: SnapshotLevel[]
 }
 
 /** `hostKeyChanged` marks a remote host whose key no longer matches the pinned one (HTTP 409 `place_host_key_changed`). */
@@ -42,6 +47,13 @@ export interface StartContext {
   progress?: (p: ProgressUpdate) => void
   /** The DSH runtime ref the bootstrap will install; a driver with a template cache needs it for the cache key (no ref, no cache). */
   runtimeRef?: string
+}
+
+/** A snapshot as a driver sees it: its id, level and its own handle (secret keys opened). */
+export interface SnapshotRef {
+  id: string
+  level: SnapshotLevel
+  handle: Handle
 }
 
 export interface Driver {
@@ -89,6 +101,14 @@ export interface Driver {
   maintain?(id: string, handle: Handle, spec: TemplateSpec): Promise<void>
   /** Frees what an owner held once their last sandbox is gone (Docker: their network). */
   releaseOwner?(owner: string): Promise<void>
+  /** Takes a native snapshot of a sandbox (only for levels listed in `capabilities.snapshots`); returns where it is kept. */
+  snapshot?(id: string, handle: Handle, spec: TemplateSpec, opts: { snapId: string; level: SnapshotLevel; name: string }): Promise<{ handle: Handle; sizeBytes?: number }>
+  /** Puts a native snapshot back into its own sandbox on this place; returns the machine's new handle (running, envd reachable, like `create`). */
+  restoreSnapshot?(id: string, handle: Handle, spec: TemplateSpec, snap: SnapshotRef, ctx: StartContext): Promise<Handle>
+  /** Makes a new sandbox from a native snapshot (same place); returns its handle (running, envd reachable, like `create`). */
+  createFromSnapshot?(id: string, owner: string, spec: TemplateSpec, ctx: StartContext, snap: SnapshotRef): Promise<Handle>
+  /** Removes whatever the place keeps for a native snapshot (a volume, an image, a provider snapshot). */
+  deleteSnapshot?(snap: SnapshotRef): Promise<void>
   /** SSH-style drivers: the host key fingerprint (`SHA256:...`) seen when connecting without a pinned key (admin "test connection"). */
   observedHostKey?(): string | undefined
   close?(): Promise<void>

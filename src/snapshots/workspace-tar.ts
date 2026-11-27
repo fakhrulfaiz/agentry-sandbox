@@ -3,7 +3,7 @@
  * streams its output into a file; restore empties the workspace and streams a tar back in through stdin.
  */
 import { createReadStream, createWriteStream } from 'node:fs'
-import { rename, rm } from 'node:fs/promises'
+import { rename, rm, stat } from 'node:fs/promises'
 import { once } from 'node:events'
 import { randomBytes } from 'node:crypto'
 import type { EnvdClient } from '../envd/client.ts'
@@ -84,10 +84,15 @@ export async function saveWorkspace(envd: EnvdClient, opts: { user: string; work
  * Replaces the workspace's contents with a saved tar: empties the folder (the folder itself stays, it may be a
  * mount), extracts, then gives the files to `owner` (the sandbox's agent user).
  */
-export async function restoreWorkspace(envd: EnvdClient, opts: { user: string; workspace: string; file: string; owner: string }): Promise<void> {
+export async function restoreWorkspace(envd: EnvdClient, opts: { user: string; workspace: string; file: string; owner: string; /** Empty the workspace first (default); false extracts over what is there. */ clear?: boolean }): Promise<void> {
+  try {
+    await stat(opts.file)
+  } catch {
+    throw new Error('the snapshot file is missing on the service host')
+  }
   const tag = `restore-${randomBytes(8).toString('hex')}`
   const ws = sq(opts.workspace)
-  const script = `set -e\nfind ${ws} -mindepth 1 -delete\ntar -xzf - -C ${ws}\nchown -hR ${sq(`${opts.owner}:`)} ${ws}`
+  const script = `set -e\n${opts.clear === false ? '' : `find ${ws} -mindepth 1 -delete\n`}tar -xzf - -C ${ws}\nchown -hR ${sq(`${opts.owner}:`)} ${ws}`
   const stream = envd.process.start(
     { process: { cmd: '/bin/sh', args: ['-c', script], envs: {} }, tag, stdin: true },
     { headers: envd.userHeaders(opts.user) },
@@ -114,8 +119,10 @@ export async function restoreWorkspace(envd: EnvdClient, opts: { user: string; w
     }
     await envd.process.closeStdin({ process: selector })
   } catch (e) {
-    // The process may have ended already (tar failed early); its exit below says why.
-    if (code === -1) await reader.catch(() => {})
+    // The process may have ended already (tar failed early): its exit code below says why. Otherwise free it
+    // (a tar waiting on stdin would hang) and report this error.
+    await envd.process.closeStdin({ process: selector }).catch(() => {})
+    await reader.catch(() => {})
     if (code === -1) throw e
   }
   await reader

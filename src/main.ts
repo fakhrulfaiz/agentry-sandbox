@@ -34,6 +34,7 @@ async function main(): Promise<void> {
   const places = await createPlaceRegistry({ store, config, local, drivers: { e2b: e2bFactory(), 'docker-ssh': dockerSshFactory(config), 'ssh-machine': sshMachineFactory(config, { local: docker }) }, probeTtlMs: 30_000, probeTimeoutMs: 5_000 })
   const service = createSandboxService({ store, places, config })
   await service.loadSettings()
+  await service.recoverSnapshots()
 
   // GPUs are looked for once here (not per request) and remembered.
   const found = await local.discoverGpus?.().catch(() => [])
@@ -60,6 +61,12 @@ async function main(): Promise<void> {
         if (stopped.length > 0) log('stopped idle sandboxes', stopped)
       })
       .catch((e: unknown) => log('idle sweep failed', String(e)))
+    void service
+      .sweepSnapshots()
+      .then((gone) => {
+        if (gone.length > 0) log('removed expired snapshots', gone)
+      })
+      .catch((e: unknown) => log('snapshot sweep failed', String(e)))
   }, 60_000)
 
   const shutdown = () => {

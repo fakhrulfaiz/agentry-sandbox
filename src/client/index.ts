@@ -63,6 +63,23 @@ export interface WireCapabilities {
   templateFields: string[]
 }
 
+export type WireSnapshotLevel = 'workspace' | 'disk' | 'memory'
+
+export interface WireSnapshot {
+  id: string
+  object: 'snapshot'
+  sandbox_id: string
+  /** `service` for a workspace tar kept on the service host, else the place that holds it. */
+  place: string
+  level: WireSnapshotLevel
+  name: string
+  state: 'saving' | 'ready' | 'failed'
+  size_bytes: number | null
+  error: string | null
+  created_at: number
+  expires_at: number | null
+}
+
 /** One enabled place, default first. */
 export interface WireBackend {
   id: string
@@ -76,10 +93,12 @@ export interface WireBackend {
   /** The image sandboxes use when a template names none, and what it ships (when labelled). */
   default_image?: { name: string; runtimes?: Record<string, string>; python_packages?: string[]; tools?: string[] }
   capabilities: WireCapabilities
+  /** The snapshot levels a sandbox here can have. */
+  snapshots?: WireSnapshotLevel[]
 }
 
 /** Error codes the service answers with (others are possible). */
-export type SandboxApiErrorCode = 'unauthorized' | 'owner_required' | 'invalid_request' | 'not_found' | 'sandbox_failed' | 'quota_exceeded' | 'place_unavailable' | 'place_disabled' | 'gpu_unavailable' | 'place_in_use' | 'place_host_key_changed' | 'unreachable' | (string & {})
+export type SandboxApiErrorCode = 'unauthorized' | 'owner_required' | 'invalid_request' | 'not_found' | 'sandbox_failed' | 'quota_exceeded' | 'place_unavailable' | 'place_disabled' | 'gpu_unavailable' | 'place_in_use' | 'place_host_key_changed' | 'snapshots_off' | 'snapshot_not_ready' | 'unreachable' | (string & {})
 
 /** A failed call: the service's `{ error: { code, message } }`, or `unreachable` when it did not answer. */
 export class SandboxApiError extends Error {
@@ -93,11 +112,18 @@ export interface SandboxApi {
   backends(): Promise<WireBackend[]>
   list(): Promise<WireSandbox[]>
   get(id: string): Promise<WireSandbox>
-  create(body: { name: string; template_id?: string; template?: WireTemplate; workspace_path?: string; place?: string }): Promise<WireSandbox>
+  create(body: { name: string; template_id?: string; template?: WireTemplate; workspace_path?: string; place?: string; snapshot?: string }): Promise<WireSandbox>
   start(id: string): Promise<WireSandbox>
   stop(id: string): Promise<WireSandbox>
   reset(id: string, opts: { keepWorkspace: boolean }): Promise<WireSandbox>
   remove(id: string): Promise<void>
+  /** Starts a snapshot (answers `saving`; poll `getSnapshot` until `ready` or `failed`). */
+  snapshot(id: string, body?: { name?: string; level?: WireSnapshotLevel; stop_first?: boolean }): Promise<WireSnapshot>
+  listSnapshots(opts?: { sandbox?: string }): Promise<WireSnapshot[]>
+  getSnapshot(snapId: string): Promise<WireSnapshot>
+  deleteSnapshot(snapId: string): Promise<void>
+  /** Puts a snapshot back into a sandbox (workspace files in place; disk and memory rebuild it). */
+  restore(id: string, snapId: string): Promise<WireSandbox>
   /** envd for one sandbox, through the relay; calls choose their user with `userHeaders(user)`. */
   envd(id: string): EnvdClient
 }
@@ -144,6 +170,11 @@ export function createSandboxApi(opts: { url: string; key: string; owner: string
     stop: (id) => call('POST', `/v1/sandboxes/${seg(id)}/stop`),
     reset: (id, { keepWorkspace }) => call('POST', `/v1/sandboxes/${seg(id)}/reset`, { keep_workspace: keepWorkspace }),
     remove: (id) => call('DELETE', `/v1/sandboxes/${seg(id)}`),
+    snapshot: (id, body = {}) => call('POST', `/v1/sandboxes/${seg(id)}/snapshots`, body),
+    listSnapshots: async (o = {}) => (await call<{ data: WireSnapshot[] }>('GET', `/v1/snapshots${o.sandbox ? `?sandbox=${seg(o.sandbox)}` : ''}`)).data,
+    getSnapshot: (snapId) => call('GET', `/v1/snapshots/${seg(snapId)}`),
+    deleteSnapshot: (snapId) => call('DELETE', `/v1/snapshots/${seg(snapId)}`),
+    restore: (id, snapId) => call('POST', `/v1/sandboxes/${seg(id)}/restore`, { snapshot: snapId }),
     envd: (id) => createEnvdClient({ baseUrl: `${base}/v1/sandboxes/${seg(id)}/envd`, accessToken: '', headers: auth, userVia: 'header', fetch: doFetch }),
   }
 }
