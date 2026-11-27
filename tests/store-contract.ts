@@ -1,6 +1,6 @@
 /** The store contract, run against every Store implementation. */
 import { beforeEach, describe, expect, it } from 'vitest'
-import type { PlaceRecord, SandboxRecord, Store, TemplateRecord } from '../src/store/types.ts'
+import type { PlaceRecord, SandboxRecord, SnapshotRecord, Store, TemplateRecord } from '../src/store/types.ts'
 
 let n = 0
 export const sandbox = (over: Partial<SandboxRecord> = {}): SandboxRecord => ({
@@ -27,6 +27,23 @@ const template = (over: Partial<TemplateRecord> = {}): TemplateRecord => ({
   spec: { image: 'python:3.13', setupCommands: ['pip install rich'], files: [{ path: 'a.txt', content: 'x' }], network: false },
   createdAt: 5,
   updatedAt: 5,
+  ...over,
+})
+
+export const snapshot = (over: Partial<SnapshotRecord> = {}): SnapshotRecord => ({
+  id: `snap_${(++n).toString(16).padStart(32, '0')}`,
+  owner: 'alice',
+  sandboxId: 'sbx_1',
+  place: 'service',
+  level: 'workspace',
+  name: 'before refactor',
+  state: 'saving',
+  handle: { file: 'snap_x.tar.gz' },
+  handleSecrets: null,
+  sizeBytes: null,
+  error: null,
+  createdAt: 1_000 + n,
+  expiresAt: null,
   ...over,
 })
 
@@ -156,6 +173,41 @@ export function storeContract(name: string, make: () => Promise<Store>) {
       const u = await store.sandboxes.update(r.id, 'alice', { handleSecrets: 'bmV3' })
       expect(u?.handleSecrets).toBe('bmV3')
       expect((await store.sandboxes.update(r.id, 'alice', { handleSecrets: null }))?.handleSecrets).toBeNull()
+    })
+
+    it('snapshots are owner-scoped, round-trip and list by sandbox', async () => {
+      const a = snapshot({ sandboxId: 'sbx_a', handleSecrets: 'c2VhbGVk', sizeBytes: 12 })
+      const b = snapshot({ sandboxId: 'sbx_b' })
+      const c = snapshot({ owner: 'bob', sandboxId: 'sbx_a' })
+      for (const r of [a, b, c]) await store.snapshots.insert(r)
+      expect(await store.snapshots.get(a.id, 'alice')).toEqual(a)
+      expect(await store.snapshots.get(a.id, 'bob')).toBeUndefined()
+      expect(await store.snapshots.getAny(a.id)).toEqual(a)
+      expect((await store.snapshots.list('alice')).map((r) => r.id)).toEqual([a.id, b.id])
+      expect((await store.snapshots.list('alice', { sandboxId: 'sbx_b' })).map((r) => r.id)).toEqual([b.id])
+      expect((await store.snapshots.list('bob')).map((r) => r.id)).toEqual([c.id])
+      expect((await store.snapshots.listAll()).map((r) => r.id).sort()).toEqual([a.id, b.id, c.id].sort())
+    })
+
+    it('snapshot update patches state, size and error; delete is owner-checked', async () => {
+      const a = snapshot()
+      await store.snapshots.insert(a)
+      const u = await store.snapshots.update(a.id, 'alice', { state: 'ready', sizeBytes: 5_000_000_000, handle: { file: 'f' }, expiresAt: 99 })
+      expect(u).toMatchObject({ state: 'ready', sizeBytes: 5_000_000_000, handle: { file: 'f' }, expiresAt: 99 })
+      expect(await store.snapshots.update(a.id, 'bob', { state: 'failed' })).toBeUndefined()
+      expect((await store.snapshots.update(a.id, 'alice', { state: 'failed', error: 'boom', sizeBytes: null }))).toMatchObject({ state: 'failed', error: 'boom', sizeBytes: null })
+      expect(await store.snapshots.delete(a.id, 'bob')).toBe(false)
+      expect(await store.snapshots.delete(a.id, 'alice')).toBe(true)
+      expect(await store.snapshots.get(a.id, 'alice')).toBeUndefined()
+    })
+
+    it('listExpired returns snapshots past their expiry, any owner', async () => {
+      const old = snapshot({ expiresAt: 100 })
+      const oldBob = snapshot({ owner: 'bob', expiresAt: 150 })
+      const fresh = snapshot({ expiresAt: 500 })
+      const forever = snapshot({ expiresAt: null })
+      for (const r of [old, oldBob, fresh, forever]) await store.snapshots.insert(r)
+      expect((await store.snapshots.listExpired(200)).map((r) => r.id).sort()).toEqual([old.id, oldBob.id].sort())
     })
   })
 }
