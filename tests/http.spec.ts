@@ -31,6 +31,19 @@ describe('HTTP API', () => {
     expect((await json(r)).error).toMatchObject({ code: 'owner_required' })
   })
 
+  it('shows progress on a provisioning sandbox (get and list) and nowhere else', async () => {
+    const id = `sbx_${'7'.repeat(32)}`
+    await s.store.sandboxes.insert({ id, owner: 'alice', name: 'box', backend: 'local', template: {}, templateId: null, state: 'provisioning', handle: {}, handleSecrets: null, error: null, progress: { stage: 'running_setup', step: 2, steps: 3, detail: 'npm install', updatedAt: 1_764_230_000_500 }, createdAt: 1, startedAt: null, lastUsedAt: null })
+    const expected = { stage: 'running_setup', step: 2, steps: 3, detail: 'npm install', updated_at: 1_764_230_000 }
+    expect((await json(await s.call(`/v1/sandboxes/${id}`))).progress).toEqual(expected)
+    expect(((await json(await s.call('/v1/sandboxes'))).data as { progress?: unknown }[])[0]!.progress).toEqual(expected)
+    await s.store.sandboxes.update(id, 'alice', { state: 'running', progress: null })
+    expect(await json(await s.call(`/v1/sandboxes/${id}`))).not.toHaveProperty('progress')
+    // Even a stale progress is never shown once the sandbox is not provisioning.
+    await s.store.sandboxes.update(id, 'alice', { progress: { stage: 'finishing', updatedAt: 1 } })
+    expect(await json(await s.call(`/v1/sandboxes/${id}`))).not.toHaveProperty('progress')
+  })
+
   it('create, list, get, start, stop, reset, delete round-trip', async () => {
     const created = await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'box', template: { image: 'python:3.13', setup_commands: ['echo hi'], resources: { memory_mb: 1024 } } }) })
     expect(created.status).toBe(201)

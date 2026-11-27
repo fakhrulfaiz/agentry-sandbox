@@ -72,7 +72,7 @@ export function createDockerSshDriver(baseConfig: SandboxConfig, place: { target
     },
   }
   // Everything but probe/close runs only on a pinned connection, and a host key mismatch surfaces as HostKeyChangedError.
-  for (const name of ['discoverGpus', 'create', 'start', 'stop', 'destroy', 'status', 'envdEndpoint', 'listManaged', 'maintain', 'releaseOwner', 'describeImage'] as const) {
+  for (const name of ['discoverGpus', 'create', 'start', 'stop', 'destroy', 'status', 'envdEndpoint', 'listManaged', 'maintain', 'releaseOwner', 'describeImage', 'commitCache'] as const) {
     const fn = inner[name] as ((...a: unknown[]) => Promise<unknown>) | undefined
     if (!fn) continue
     ;(driver as unknown as Record<string, unknown>)[name] = async (...args: unknown[]) => {

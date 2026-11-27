@@ -300,7 +300,7 @@ describe('places', () => {
     const store = createMemoryStore()
     const places = await createPlaceRegistry({ store, config, local: createFakeDriver(), drivers: {} })
     const service = createSandboxService({ store, places, config, provision: noBootstrap })
-    await store.sandboxes.insert({ id: `sbx_${'1'.repeat(32)}`, owner: 'alice', name: 'old', backend: 'local', template: {}, templateId: null, state: 'stopped', handle: {}, handleSecrets: null, error: null, createdAt: 1, startedAt: null, lastUsedAt: null })
+    await store.sandboxes.insert({ id: `sbx_${'1'.repeat(32)}`, owner: 'alice', name: 'old', backend: 'local', template: {}, templateId: null, state: 'stopped', handle: {}, handleSecrets: null, error: null, progress: null, createdAt: 1, startedAt: null, lastUsedAt: null })
     expect((await service.start('alice', `sbx_${'1'.repeat(32)}`)).state).toBe('running')
   })
 
@@ -364,5 +364,52 @@ describe('exclusive GPUs', () => {
     const { backend, service } = await setup()
     backend.setGpus([])
     await expect(service.create('alice', { name: 'x', gpus: 1 })).rejects.toMatchObject({ name: 'LimitError', message: "place 'Local Docker' has no GPUs" })
+  })
+})
+
+describe('create progress', () => {
+  it('is stored while provisioning, in order, and removed when the sandbox is running', async () => {
+    const store = createMemoryStore()
+    const backend = createFakeDriver()
+    const places = await createPlaceRegistry({ store, config, local: backend, drivers: {} })
+    const seen: unknown[] = []
+    let id = ''
+    const provision = async (_d: unknown, sid: string, h: Record<string, string>, _s: unknown, progress?: (p: { stage: string; step?: number; steps?: number; detail?: string }) => void) => {
+      id = sid
+      const snap = async () => seen.push((await store.sandboxes.getAny(sid))?.progress?.stage)
+      progress?.({ stage: 'installing_packages' })
+      await new Promise((r) => setTimeout(r, 10))
+      await snap()
+      progress?.({ stage: 'running_setup', step: 1, steps: 2, detail: 'npm install' })
+      await new Promise((r) => setTimeout(r, 10))
+      const mid = (await store.sandboxes.getAny(sid))?.progress
+      expect(mid).toMatchObject({ stage: 'running_setup', step: 1, steps: 2, detail: 'npm install' })
+      return h
+    }
+    const service = createSandboxService({ store, places, config, provision: provision as never })
+    const s = await service.create('alice', { name: 'box' })
+    expect(seen).toEqual(['installing_packages'])
+    expect(s.state).toBe('running')
+    expect((await store.sandboxes.getAny(id))?.progress).toBeNull()
+  })
+
+  it('starts at "starting" and is cleared when the create fails', async () => {
+    const store = createMemoryStore()
+    const backend = createFakeDriver()
+    const places = await createPlaceRegistry({ store, config, local: backend, drivers: {} })
+    const stages: string[] = []
+    const provision = async (_d: unknown, _id: string, _h: unknown, _s: unknown, progress?: (p: { stage: string }) => void) => {
+      progress?.({ stage: 'preparing' })
+      throw new Error('apt failed')
+    }
+    const service = createSandboxService({ store, places, config, provision: provision as never })
+    const orig = store.sandboxes.update
+    store.sandboxes.update = async (id, owner, patch) => {
+      if (patch.progress) stages.push(patch.progress.stage)
+      return orig(id, owner, patch)
+    }
+    await expect(service.create('alice', { name: 'box' })).rejects.toThrow('apt failed')
+    expect(stages).toEqual(['starting', 'preparing'])
+    expect((await store.sandboxes.listAll()).length).toBe(0)
   })
 })

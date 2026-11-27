@@ -14,6 +14,7 @@ export const sandbox = (over: Partial<SandboxRecord> = {}): SandboxRecord => ({
   handle: {},
   handleSecrets: null,
   error: null,
+  progress: null,
   createdAt: 1_000 + n,
   startedAt: null,
   lastUsedAt: null,
@@ -137,6 +138,15 @@ export function storeContract(name: string, make: () => Promise<Store>) {
       expect((await store.places.get(a.id))?.isDefault).toBe(false)
       expect((await store.places.get(b.id))?.isDefault).toBe(true)
       expect((await store.places.list()).filter((x) => x.isDefault)).toHaveLength(1)
+    })
+
+    it('sandbox progress round-trips and clears', async () => {
+      const r = sandbox()
+      await store.sandboxes.insert(r)
+      const p = { stage: 'running_setup' as const, step: 2, steps: 3, detail: 'npm install', updatedAt: 5 }
+      expect((await store.sandboxes.update(r.id, 'alice', { progress: p }))?.progress).toEqual(p)
+      expect((await store.sandboxes.get(r.id, 'alice'))?.progress).toEqual(p)
+      expect((await store.sandboxes.update(r.id, 'alice', { progress: null }))?.progress).toBeNull()
     })
 
     it('sandbox handleSecrets round-trips', async () => {

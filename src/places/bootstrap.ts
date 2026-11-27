@@ -12,7 +12,8 @@
 import { createEnvdClient } from '../envd/client.ts'
 import { runInEnvd, sq } from '../envd/run.ts'
 import { envdToken } from '../envd/token.ts'
-import type { TemplateSpec } from '../store/types.ts'
+import type { ProgressUpdate, TemplateSpec } from '../store/types.ts'
+import { markerPath } from './template-cache.ts'
 import type { Driver, Handle } from './driver.ts'
 
 const DEFAULT_WORKSPACE = '/workspace'
@@ -30,6 +31,8 @@ export interface BootstrapOptions {
   startTimeoutMs: number
   /** Identifies the runtime in `handle.dsh` so it is copied once per ref (default `dsh`). */
   dshRef?: string
+  /** Called as setup moves through its stages (the service stores it on the sandbox record). */
+  progress?: (p: ProgressUpdate) => void
 }
 
 /** The script that makes `agent` (uid 1000) with passwordless sudo, on Debian-like or Alpine images, and owns the workspace. */
@@ -108,13 +111,23 @@ export async function bootstrap(driver: Driver, id: string, handle: Handle, spec
       const r = await runInEnvd(envd, user, script, { ...(cwd ? { cwd } : {}), ...(spec.env ? { env: spec.env } : {}) })
       if (r.code !== 0) throw new Error(`${what} failed (exit ${String(r.code)}): ${(r.stderr || r.stdout).trim().slice(-500)}`)
     }
+    const report = opts.progress ?? (() => {})
     if ((first || copyDsh) && driver.capabilities.runsAsRoot) await envd.init({ ...base, defaultUser: 'root' })
-    if (first) await provision(must, envd, spec, workspaceKept, agent, driver.agentUser !== undefined)
-    if (copyDsh) {
-      await installDsh(must, envd, id, ref, source!.tar)
+    // Template cache: a machine made from a cached base already has the agent user, the packages and the runtime.
+    const cacheKey = handle.cacheKey
+    const cached = first && !workspaceKept && handle.cache === 'hit' && cacheKey !== undefined && (await runInEnvd(envd, 'root', `test -f ${sq(markerPath(cacheKey))}`, { cwd: '/' })).code === 0
+    if (first) await provisionBase(must, spec, agent, driver.agentUser !== undefined, cached, report)
+    if (copyDsh) await installDsh(must, envd, id, ref, source!.tar, report)
+    // A miss saves the base before template files and setup commands touch the machine. The commit is awaited: it
+    // pauses the container, and anything those steps wrote would otherwise leak into the shared image.
+    if (first && !cached && handle.cache === 'miss' && cacheKey !== undefined && driver.commitCache && driver.agentUser === undefined) {
+      await must('root', `mkdir -p /opt/agentry && : > ${sq(markerPath(cacheKey))}`, 'marking the template cache')
+      await driver.commitCache(handle)
     }
+    if (first) await provisionContent(must, envd, spec, workspaceKept, agent, report)
+    report({ stage: 'finishing' })
     await envd.init({ ...base, defaultUser: agent })
-    const { recreated: _r, ...rest } = handle
+    const { recreated: _r, cache: _c, cacheKey: _k, cacheBase: _b, ...rest } = handle
     return { ...rest, provisioned: 'true', ...(source !== null ? { dsh: ref } : {}) }
   } finally {
     ep.release?.()
@@ -127,13 +140,14 @@ export async function bootstrap(driver: Driver, id: string, handle: Handle, spec
  * this ref, and the swap runs under a lock, extracting beside the target and renaming it in. The runtime it replaces
  * is renamed to dsh.prev, not deleted, so a process still running from it is not pulled out from under.
  */
-async function installDsh(must: Must, envd: ReturnType<typeof createEnvdClient>, id: string, ref: string, tar: () => Promise<Buffer>): Promise<void> {
+async function installDsh(must: Must, envd: ReturnType<typeof createEnvdClient>, id: string, ref: string, tar: () => Promise<Buffer>, report: (p: ProgressUpdate) => void): Promise<void> {
   const safe = id.replace(/[^A-Za-z0-9_-]/gu, '_')
   const tarPath = `/opt/agentry/.dsh-${safe}.tar`
   const tmp = `/opt/agentry/dsh.tmp-${safe}`
   await must('root', 'mkdir -p /opt/agentry', 'preparing /opt/agentry')
   const current = await runInEnvd(envd, 'root', `cat ${sq(DSH_REF_FILE)} 2>/dev/null`, { cwd: '/' })
   if (current.stdout.trim() === ref) return
+  report({ stage: 'copying_runtime' })
   await envd.writeFile(tarPath, new Uint8Array(await tar()), 'root')
   const script = `set -e
 exec 9>/opt/agentry/.dsh.lock
@@ -153,21 +167,36 @@ rm -f ${sq(tarPath)}`
 
 type Must = (user: string, script: string, what: string, cwd?: string) => Promise<void>
 
-async function provision(must: Must, envd: ReturnType<typeof createEnvdClient>, spec: TemplateSpec, workspaceKept: boolean, agent: string, existingUser: boolean): Promise<void> {
+/** The agent user, workspace and template packages (what the template cache saves). `cached`: the machine already has them. */
+async function provisionBase(must: Must, spec: TemplateSpec, agent: string, existingUser: boolean, cached: boolean, report: (p: ProgressUpdate) => void): Promise<void> {
   const WORKSPACE = workspaceOf(spec)
-  if (existingUser) {
-    // A machine's own user: no user or sudoers entry is made, and packages are the operator's business.
+  if (existingUser || cached) {
+    // A machine's own user (or a cached base, whose user exists): no user or sudoers entry is made; the fresh workspace volume is still handed to the agent.
+    if (!cached) report({ stage: 'preparing' })
     await must('root', `set -e\nmkdir -p ${sq(WORKSPACE)}\nchown ${sq(`${agent}:`)} ${sq(WORKSPACE)}`, 'preparing the workspace')
-  } else {
-    await must('root', ensureAgent(WORKSPACE), 'creating the agent user')
-    if (spec.packages && spec.packages.length > 0) await must('root', installScript(spec.packages), 'installing packages')
+    return
   }
-  // Template files and setup commands live in the workspace volume, which survived: running them again would clobber edits.
+  report({ stage: 'preparing' })
+  await must('root', ensureAgent(WORKSPACE), 'creating the agent user')
+  if (spec.packages && spec.packages.length > 0) {
+    report({ stage: 'installing_packages' })
+    await must('root', installScript(spec.packages), 'installing packages')
+  }
+}
+
+/** Template files and setup commands live in the workspace volume; when it survived, running them again would clobber edits. */
+async function provisionContent(must: Must, envd: ReturnType<typeof createEnvdClient>, spec: TemplateSpec, workspaceKept: boolean, agent: string, report: (p: ProgressUpdate) => void): Promise<void> {
   if (workspaceKept) return
+  const WORKSPACE = workspaceOf(spec)
+  if ((spec.files ?? []).length > 0) report({ stage: 'writing_files' })
   for (const file of spec.files ?? []) {
     const path = file.path.startsWith('/') ? file.path : `${WORKSPACE}/${file.path}`
     await must(agent, `mkdir -p "$(dirname ${sq(path)})"`, `preparing ${file.path}`)
     await envd.writeFile(path, new TextEncoder().encode(file.content), agent)
   }
-  for (const command of spec.setupCommands ?? []) await must(agent, command, `setup command "${command}"`, WORKSPACE)
+  const commands = spec.setupCommands ?? []
+  for (const [i, command] of commands.entries()) {
+    report({ stage: 'running_setup', step: i + 1, steps: commands.length, detail: command.slice(0, 120) })
+    await must(agent, command, `setup command "${command}"`, WORKSPACE)
+  }
 }

@@ -20,6 +20,15 @@ export interface WireTemplate {
   gpus?: number | 'all'
 }
 
+/** Where a provisioning sandbox is in its setup; `step`, `steps` and `detail` come with `running_setup` only. */
+export interface WireProgress {
+  stage: 'pulling_image' | 'starting' | 'preparing' | 'installing_packages' | 'copying_runtime' | 'writing_files' | 'running_setup' | 'finishing'
+  step?: number
+  steps?: number
+  detail?: string
+  updated_at: number
+}
+
 export interface WireSandbox {
   id: string
   object: 'sandbox'
@@ -34,6 +43,8 @@ export interface WireSandbox {
   workspace_path: string
   template: WireTemplate
   error: string | null
+  /** Only while `state` is `provisioning`. */
+  progress?: WireProgress
   created_at: number
   started_at: number | null
   last_used_at: number | null

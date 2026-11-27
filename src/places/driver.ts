@@ -3,7 +3,7 @@
  * makes the machine and gets envd reachable; the shared bootstrap
  * (`bootstrap.ts`) then provisions it the same way for every kind.
  */
-import type { GpuInfo, TemplateSpec } from '../store/types.ts'
+import type { GpuInfo, ProgressUpdate, TemplateSpec } from '../store/types.ts'
 
 /**
  * A driver's record of one machine. Keys starting with `secret.` hold credentials (E2B's envd token): the
@@ -38,6 +38,10 @@ export interface ImageInfo {
 export interface StartContext {
   /** Assigned GPU uuids, [] when none. */
   gpuIds: string[]
+  /** Reports setup progress (create only; a driver ignores it when it has nothing to say). */
+  progress?: (p: ProgressUpdate) => void
+  /** The DSH runtime ref the bootstrap will install; a driver with a template cache needs it for the cache key (no ref, no cache). */
+  runtimeRef?: string
 }
 
 export interface Driver {
@@ -65,6 +69,12 @@ export interface Driver {
   describeImage?(image: string): Promise<ImageInfo | undefined>
   /** Machine made AND envd reachable; not provisioned. Cleans up after itself when it fails. */
   create(id: string, owner: string, spec: TemplateSpec, ctx: StartContext): Promise<Handle>
+  /**
+   * Saves the machine's provisioned base (agent user, packages, runtime) as a reusable image, when `create` found no
+   * cached one for this template (`handle.cacheKey` set, `handle.cache === 'miss'`). Never throws; the bootstrap
+   * waits for it so later steps cannot leak into the image.
+   */
+  commitCache?(handle: Handle): Promise<void>
   /** Starts a stopped machine; envd reachable when it resolves. Returns the updated handle. */
   start(id: string, handle: Handle, spec: TemplateSpec, ctx: StartContext): Promise<Handle>
   stop(handle: Handle): Promise<void>

@@ -78,3 +78,12 @@ describe('admin keys', () => {
     expect(() => loadConfig({ ...base, AGENTRY_SANDBOX_ADMIN_KEYS: h('a') })).toThrow(/differ/)
   })
 })
+
+describe('template cache', () => {
+  it('is on with 10 images by default and can be switched off or resized', () => {
+    expect(loadConfig(base)).toMatchObject({ templateCache: true, templateCacheMax: 10 })
+    expect(loadConfig({ ...base, AGENTRY_SANDBOX_TEMPLATE_CACHE: 'off', AGENTRY_SANDBOX_TEMPLATE_CACHE_MAX: '3' })).toMatchObject({ templateCache: false, templateCacheMax: 3 })
+    expect(() => loadConfig({ ...base, AGENTRY_SANDBOX_TEMPLATE_CACHE: 'maybe' })).toThrow('AGENTRY_SANDBOX_TEMPLATE_CACHE')
+    expect(() => loadConfig({ ...base, AGENTRY_SANDBOX_TEMPLATE_CACHE_MAX: '0' })).toThrow('AGENTRY_SANDBOX_TEMPLATE_CACHE_MAX')
+  })
+})

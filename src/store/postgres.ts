@@ -13,6 +13,7 @@ interface SandboxRow {
   handle: Record<string, string>
   handle_secrets: string | null
   error: string | null
+  progress: SandboxRecord['progress']
   created_at: Date
   started_at: Date | null
   last_used_at: Date | null
@@ -53,6 +54,7 @@ const sandboxOf = (r: SandboxRow): SandboxRecord => ({
   handle: r.handle,
   handleSecrets: r.handle_secrets,
   error: r.error,
+  progress: r.progress ?? null,
   createdAt: r.created_at.getTime(),
   startedAt: ms(r.started_at),
   lastUsedAt: ms(r.last_used_at),
@@ -83,6 +85,7 @@ const SANDBOX_COLUMNS: Record<keyof SandboxPatch, Column> = {
   handle: ['handle', (v) => JSON.stringify(v)],
   handleSecrets: ['handle_secrets', (v) => v],
   error: ['error', (v) => v],
+  progress: ['progress', (v) => (v === null ? null : JSON.stringify(v))],
   startedAt: ['started_at', (v) => ts((v as number | null) ?? null)],
   lastUsedAt: ['last_used_at', (v) => ts((v as number | null) ?? null)],
 }

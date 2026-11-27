@@ -46,6 +46,10 @@ export interface SandboxConfig {
   envdReach: 'loopback' | 'ip'
   runtime: 'runc' | 'runsc'
   egress: boolean
+  /** Save each template's provisioned base as an image and start later creates from it (Docker places). */
+  templateCache: boolean
+  /** Most template cache images kept per Docker daemon. */
+  templateCacheMax: number
   limits: Limits
 }
 
@@ -132,6 +136,8 @@ export function loadConfig(env: Env): SandboxConfig {
     envdReach: oneOf(env, 'AGENTRY_SANDBOX_ENVD_REACH', ['loopback', 'ip'] as const, 'loopback'),
     runtime: oneOf(env, 'AGENTRY_SANDBOX_RUNTIME', ['runc', 'runsc'] as const, 'runc'),
     egress: oneOf(env, 'AGENTRY_SANDBOX_EGRESS', ['on', 'off'] as const, 'on') === 'on',
+    templateCache: oneOf(env, 'AGENTRY_SANDBOX_TEMPLATE_CACHE', ['on', 'off'] as const, 'on') === 'on',
+    templateCacheMax: integer(env, 'AGENTRY_SANDBOX_TEMPLATE_CACHE_MAX', 10),
     limits: {
       maxPerOwner: integer(env, 'AGENTRY_SANDBOX_MAX_PER_OWNER', 5, 0),
       maxRunningPerOwner: integer(env, 'AGENTRY_SANDBOX_MAX_RUNNING_PER_OWNER', 2, 0),

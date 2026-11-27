@@ -19,7 +19,7 @@ import { bootstrap } from './places/bootstrap.ts'
 import { assignGpus } from './places/gpus.ts'
 import { HostKeyChangedError, TransientPlaceError, type Driver, type Handle } from './places/driver.ts'
 import type { Place, PlaceRegistry } from './places/registry.ts'
-import type { GpuInfo, SandboxRecord, Store, TemplateSpec } from './store/types.ts'
+import type { GpuInfo, ProgressUpdate, SandboxRecord, Store, TemplateSpec } from './store/types.ts'
 
 export class NotFoundError extends Error {
   constructor(what: string) {
@@ -127,7 +127,7 @@ function unavailable(place: string, e: unknown): PlaceUnavailableError | undefin
   return CONNECTION.test(text) ? new PlaceUnavailableError(place, `not reachable: ${message(e)}`) : undefined
 }
 
-type Provision = (driver: Driver, id: string, handle: Handle, spec: TemplateSpec) => Promise<Handle>
+type Provision = (driver: Driver, id: string, handle: Handle, spec: TemplateSpec, progress?: (p: ProgressUpdate) => void) => Promise<Handle>
 
 export function createSandboxService(deps: {
   store: Store
@@ -140,8 +140,9 @@ export function createSandboxService(deps: {
   provision?: Provision
 }): SandboxService {
   const { store, places, config } = deps
+  const RUNTIME_REF = config.dshRuntimeImage || 'dsh'
   const provision: Provision =
-    deps.provision ?? ((driver, id, handle, spec) => bootstrap(driver, id, handle, spec, { secret: config.secret, dshRuntime: deps.dshRuntime ?? null, startTimeoutMs: config.startTimeoutMs, dshRef: config.dshRuntimeImage || 'dsh' }))
+    deps.provision ?? ((driver, id, handle, spec, progress) => bootstrap(driver, id, handle, spec, { secret: config.secret, dshRuntime: deps.dshRuntime ?? null, startTimeoutMs: config.startTimeoutMs, dshRef: RUNTIME_REF, ...(progress ? { progress } : {}) }))
   const now = deps.now ?? Date.now
   let limits: Limits = { ...config.limits }
   let overrides: Partial<Limits> = {}
@@ -232,10 +233,11 @@ export function createSandboxService(deps: {
   }
 
   /** Runs the driver's create then the shared bootstrap; a failed bootstrap leaves nothing behind. */
-  async function makeMachine(place: Place, r: SandboxRecord, gpuIds: string[]): Promise<Handle> {
-    const handle = await call(place, () => place.driver.create(r.id, r.owner, r.template, { gpuIds }))
+  async function makeMachine(place: Place, r: SandboxRecord, gpuIds: string[], progress: (p: ProgressUpdate) => void): Promise<Handle> {
+    progress({ stage: 'starting' })
+    const handle = await call(place, () => place.driver.create(r.id, r.owner, r.template, { gpuIds, progress, runtimeRef: RUNTIME_REF }))
     try {
-      const done = await call(place, () => provision(place.driver, r.id, handle, r.template))
+      const done = await call(place, () => provision(place.driver, r.id, handle, r.template, progress))
       return withGpus(done, gpuIds)
     } catch (e) {
       await place.driver.destroy(r.id, handle, { keepWorkspace: false }).catch(() => {})
@@ -319,16 +321,38 @@ export function createSandboxService(deps: {
 
   // ---- lifecycle (callers hold the sandbox lock) ----
 
+  /** Writes progress updates to the record in order; `close` waits for the last one so none lands after the final save. */
+  function progressWriter(r: SandboxRecord) {
+    let chain: Promise<unknown> = Promise.resolve()
+    let closed = false
+    let last = ''
+    return {
+      report(p: ProgressUpdate) {
+        const same = JSON.stringify(p)
+        if (closed || same === last) return
+        last = same
+        chain = chain.then(() => store.sandboxes.update(r.id, r.owner, { progress: { ...p, updatedAt: now() } })).catch(() => {})
+      },
+      async close() {
+        closed = true
+        await chain
+      },
+    }
+  }
+
   async function build(r: SandboxRecord): Promise<SandboxRecord> {
+    const writer = progressWriter(r)
     try {
       const place = placeOf(r)
       const reserved = await reserveGpus(place, r)
-      const handle = await makeMachine(place, reserved.record, reserved.gpuIds)
+      const handle = await makeMachine(place, reserved.record, reserved.gpuIds, writer.report)
+      await writer.close()
       const t = now()
-      return await save(r, { state: 'running', handle, error: null, startedAt: t, lastUsedAt: t })
+      return await save(r, { state: 'running', handle, error: null, progress: null, startedAt: t, lastUsedAt: t })
     } catch (e) {
       // A failed start releases its GPUs.
-      await store.sandboxes.update(r.id, r.owner, { state: 'failed', error: message(e), handle: {} })
+      await writer.close()
+      await store.sandboxes.update(r.id, r.owner, { state: 'failed', error: message(e), handle: {}, progress: null })
       throw e
     }
   }
@@ -437,6 +461,7 @@ export function createSandboxService(deps: {
         handle: {},
         handleSecrets: null,
         error: null,
+        progress: null,
         createdAt: now(),
         startedAt: null,
         lastUsedAt: null,

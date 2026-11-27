@@ -14,7 +14,7 @@ import { HostKeyChangedError, type Driver } from '../places/driver.ts'
 import { LOCAL_PLACE_ID, type PlaceRegistry, type ProbeResult } from '../places/registry.ts'
 import type { SandboxConfig } from '../config.ts'
 import { GpuUnavailableError, LimitError, NotFoundError, PlaceDisabledError, PlaceUnavailableError, QuotaExceededError, type SandboxService } from '../sandboxes.ts'
-import type { GpuInfo, PlaceRecord, SandboxRecord, Store, TemplateRecord, TemplateSpec } from '../store/types.ts'
+import type { GpuInfo, PlaceRecord, Progress, SandboxRecord, Store, TemplateRecord, TemplateSpec } from '../store/types.ts'
 import { handleMcp } from '../mcp/handler.ts'
 import { createOwnerKeys, keyToWire } from './owner-keys.ts'
 import { relay } from './relay.ts'
@@ -129,6 +129,14 @@ function workspacePathFromWire(v: unknown): string | undefined {
   return v
 }
 
+const progressToWire = (p: Progress) => ({
+  stage: p.stage,
+  ...(p.step !== undefined ? { step: p.step } : {}),
+  ...(p.steps !== undefined ? { steps: p.steps } : {}),
+  ...(p.detail !== undefined ? { detail: p.detail } : {}),
+  updated_at: sec(p.updatedAt),
+})
+
 const sandboxToWire = (r: SandboxRecord, defaultImage: string) => ({
   id: r.id,
   object: 'sandbox',
@@ -142,6 +150,7 @@ const sandboxToWire = (r: SandboxRecord, defaultImage: string) => ({
   workspace_path: r.template.workspacePath ?? '/workspace',
   template: templateToWire(r.template),
   error: r.error,
+  ...(r.state === 'provisioning' && r.progress ? { progress: progressToWire(r.progress) } : {}),
   created_at: sec(r.createdAt),
   started_at: sec(r.startedAt),
   last_used_at: sec(r.lastUsedAt),

@@ -10,7 +10,8 @@ import { envdArchive, treeArchive } from '../../backends/envd-binary.ts'
 import type { GpuInfo, TemplateSpec } from '../../store/types.ts'
 import { parseNvidiaSmi } from '../gpus.ts'
 import { createEnsureImage, type EnsureImage } from '../images.ts'
-import type { Driver, Handle, ImageInfo, NetworkGuard } from '../driver.ts'
+import type { Driver, Handle, ImageInfo, NetworkGuard, StartContext } from '../driver.ts'
+import { cacheKey, cacheTag, CACHE_REPO, LABEL_BASE, LABEL_KEY, pruneList, type CacheImage } from '../template-cache.ts'
 
 const ENVD_PORT = '49983/tcp'
 const DEFAULT_WORKSPACE = '/workspace'
@@ -186,18 +187,94 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     if (volume) await client.getVolume(volume).remove().catch((e: unknown) => { if (!isNotFound(e)) throw e })
   }
 
+
+  // ---- template image cache ----
+
+  const cacheLog = (msg: string, e?: unknown) => console.log(`[agentry-sandbox] template cache: ${msg}${e === undefined ? '' : ` (${(e as Error).message ?? String(e)})`}`)
+  /** When each cache image was last used by this process; images not seen yet count from their creation time. */
+  const cacheUsed = new Map<string, number>()
+  const committing = new Set<string>()
+  const imageExists = async (ref: string): Promise<boolean> => {
+    try {
+      await client.getImage(ref).inspect()
+      return true
+    } catch (e) {
+      if (isNotFound(e)) return false
+      throw e
+    }
+  }
+
+  /** The cache key for a create and whether its image exists; undefined when the cache is off or cannot be consulted (never fails a create). */
+  async function cacheLookup(spec: TemplateSpec, ctx: StartContext | undefined): Promise<{ key: string; base: string; hit: boolean } | undefined> {
+    if (!config.templateCache || !ctx?.runtimeRef) return undefined
+    try {
+      const base = (await client.getImage(spec.image ?? config.defaultImage).inspect()).Id
+      const arch = ((await client.version()) as { Arch?: string }).Arch ?? ''
+      const key = cacheKey({ baseImage: base, packages: spec.packages, runtimeRef: `${ctx.runtimeRef}@${arch}` })
+      return { key, base, hit: await imageExists(cacheTag(key)) }
+    } catch (e) {
+      cacheLog('lookup failed, creating without it', e)
+      return undefined
+    }
+  }
+
+  /** Removes cache images beyond the newest `templateCacheMax`; an image a container still uses is refused by Docker and stays. */
+  async function pruneCache(): Promise<void> {
+    const listed = await client.listImages({ filters: { label: [LABEL_KEY] } })
+    const images: (CacheImage & { tag: string })[] = listed.flatMap((i) => {
+      const tag = (i.RepoTags ?? []).find((t) => t.startsWith(`${CACHE_REPO}:`))
+      return tag ? [{ id: i.Id, tag, usedAt: cacheUsed.get(i.Id) ?? i.Created * 1000 }] : []
+    })
+    for (const old of pruneList(images, config.templateCacheMax) as (CacheImage & { tag: string })[]) {
+      await client.getImage(old.tag).remove().then(
+        () => cacheUsed.delete(old.id),
+        (e: unknown) => {
+          if (isNotFound(e) || (e as { statusCode?: number }).statusCode === 409) return
+          throw e
+        },
+      )
+    }
+  }
+
+  async function commitCache(handle: Handle): Promise<void> {
+    const key = handle.cacheKey
+    if (!key || handle.cache !== 'miss' || !handle.containerId || committing.has(key)) return
+    committing.add(key)
+    try {
+      const tag = cacheTag(key)
+      if (await imageExists(tag)) return
+      // Container labels are copied into a commit: blank the sandbox and owner ones so the image names nobody.
+      await puller.getContainer(handle.containerId).commit({
+        repo: CACHE_REPO,
+        tag: tag.slice(CACHE_REPO.length + 1),
+        comment: 'agentry template cache',
+        pause: true,
+        changes: [`LABEL ${LABEL_KEY}=${key}`, `LABEL ${LABEL_BASE}=${handle.cacheBase ?? ''}`, 'LABEL agentry.managed=""', 'LABEL agentry.sandbox.id=""', 'LABEL agentry.sandbox.owner=""'],
+      })
+      await pruneCache().catch((e: unknown) => cacheLog('prune failed', e))
+    } catch (e) {
+      cacheLog('commit failed, the sandbox is unaffected', e)
+    } finally {
+      committing.delete(key)
+    }
+  }
+
   const labels = (id: string, owner: string) => ({ 'agentry.managed': 'true', 'agentry.sandbox.id': id, 'agentry.sandbox.owner': owner })
 
   /** Creates and boots the container on `volume`. A failure removes the container (and the volume when `ownsVolume`). */
-  async function makeContainer(id: string, owner: string, spec: TemplateSpec, gpuIds: string[], volume: string, ownsVolume: boolean, provisioned = 'false', recreated = false): Promise<Handle> {
+  async function makeContainer(id: string, owner: string, spec: TemplateSpec, gpuIds: string[], volume: string, ownsVolume: boolean, provisioned = 'false', recreated = false, ctx?: StartContext): Promise<Handle> {
     const image = spec.image ?? config.defaultImage
+    const progress = ctx?.progress
+    if (progress && !(await imageExists(image).catch(() => true))) progress({ stage: 'pulling_image' })
     await ensureImage(image)
+    progress?.({ stage: 'starting' })
+    const cache = await cacheLookup(spec, ctx)
     const net = await network.networkFor(owner)
     const cpus = spec.resources?.cpus ?? config.resources.cpus
     const memory = spec.resources?.memoryMb ? spec.resources.memoryMb * 1024 * 1024 : config.resources.memoryBytes
-    const container = await client.createContainer({
+    const createFrom = (from: string) => client.createContainer({
       name: containerName(id),
-      Image: image,
+      Image: from,
       Entrypoint: ['/opt/agentry/envd', '--isnotfc', '--no-cgroups', '--port', '49983'],
       Cmd: [],
       User: 'root',
@@ -219,9 +296,23 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
         ...(config.envdReach === 'loopback' ? { PortBindings: { [ENVD_PORT]: [{ HostIp: '127.0.0.1', HostPort: '' }] } } : {}),
       },
     })
+    let hit = cache?.hit === true
+    let container
+    if (hit) {
+      try {
+        container = await createFrom(cacheTag(cache!.key))
+        cacheUsed.set((await client.getImage(cacheTag(cache!.key)).inspect()).Id, Date.now())
+      } catch (e) {
+        // Pruned between the lookup and now: build the base the long way.
+        cacheLog('cached image vanished, creating from the base image', e)
+        hit = false
+      }
+    }
+    container ??= await createFrom(image)
+    const cacheHandle: Handle = cache ? { cacheKey: cache.key, cacheBase: cache.base, cache: hit ? 'hit' : 'miss' } : {}
     try {
       await container.putArchive(await envdArchive(client, config.envdImage, ensureImage), { path: '/' })
-      return await boot({ containerId: container.id, volume, network: net, provisioned, ...(recreated ? { recreated: 'true' } : {}) }, spec)
+      return await boot({ containerId: container.id, volume, network: net, provisioned, ...cacheHandle, ...(recreated ? { recreated: 'true' } : {}) }, spec)
     } catch (e) {
       // Fail closed: nothing half-made stays behind, running or not.
       await removeAll(container.id, ownsVolume ? volume : undefined).catch(() => {})
@@ -266,8 +357,10 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     async create(id, owner, spec, ctx) {
       const volume = volumeName(id)
       await client.createVolume({ Name: volume, Labels: labels(id, owner) })
-      return makeContainer(id, owner, spec, ctx.gpuIds, volume, true)
+      return makeContainer(id, owner, spec, ctx.gpuIds, volume, true, 'false', false, ctx)
     },
+
+    commitCache,
 
     async start(id, handle, spec, ctx) {
       try {
