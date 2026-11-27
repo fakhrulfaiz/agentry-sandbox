@@ -98,7 +98,7 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
       if (!port) throw new Error('envd port is not published on 127.0.0.1')
       if (!options.reach) return { baseUrl: `http://127.0.0.1:${port}` }
       const reached = await options.reach(Number(port))
-      return { baseUrl: reached.baseUrl, close: reached.release }
+      return { baseUrl: reached.baseUrl, ...(reached.release ? { close: reached.release } : {}) }
     }
     const ip = info.NetworkSettings.Networks?.[handle.network ?? '']?.IPAddress
     if (!ip) throw new Error('sandbox has no container IP')
