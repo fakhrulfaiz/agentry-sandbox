@@ -113,6 +113,25 @@ describe('admin places', () => {
     expect((await post(svc, '/v1/admin/places', { name: 'X', kind: 'nope', config: {} })).status).toBe(400)
   })
 
+  it('a plain Save refreshes place GPUs with the stored key', async () => {
+    const RTX = { index: 0, uuid: 'GPU-rtx', name: 'NVIDIA GeForce RTX 3070' }
+    let probes = 0
+    svc = await startTestService(ADMIN, undefined, {
+      'fake-ssh': () => Object.assign(createFakeDriver(), {
+        kind: 'fake-ssh',
+        observedHostKey: () => KEY,
+        discoverGpus: async () => { probes += 1; return [RTX] },
+      }),
+    })
+    const created = await (await post(svc, '/v1/admin/places', { name: 'Box', kind: 'fake-ssh', config: { url: 'ssh://u@h' }, secrets: { private_key: 'TOPSECRET' }, host_key: KEY })).json() as { id: string }
+    expect(created).toMatchObject({ gpus: { count: 1, models: ['NVIDIA GeForce RTX 3070'] } })
+    probes = 0
+    const saved = await post(svc, `/v1/admin/places/${created.id}`, { name: 'Renamed' }, 'PUT')
+    expect(saved.status).toBe(200)
+    expect(probes).toBe(1)
+    expect(await saved.json()).toMatchObject({ gpus: { count: 1, models: ['NVIDIA GeForce RTX 3070'] } })
+  })
+
   it('admin delete of a place with sandboxes answers 409 place_in_use', async () => {
     svc = await startTestService(ADMIN, undefined, fakeKind())
     const created = await (await post(svc, '/v1/admin/places', { name: 'Box', kind: 'fake-ssh', config: {} })).json() as { id: string }

@@ -399,9 +399,20 @@ components:
         image: { type: string }
         template: { $ref: "#/components/schemas/TemplateSpec" }
         error: { type: [string, "null"] }
+        progress: { $ref: "#/components/schemas/Progress" }
         created_at: { type: integer }
         started_at: { type: [integer, "null"] }
         last_used_at: { type: [integer, "null"] }
+    Progress:
+      type: object
+      description: Where a provisioning sandbox is in its setup. Present only while `state` is `provisioning`.
+      required: [stage, updated_at]
+      properties:
+        stage: { enum: [pulling_image, starting, preparing, installing_packages, copying_runtime, writing_files, running_setup, finishing] }
+        step: { type: integer, description: "`running_setup` only: the setup command being run (1-based)." }
+        steps: { type: integer, description: "`running_setup` only: how many setup commands there are." }
+        detail: { type: string, description: "`running_setup` only: the command, cut to 120 characters." }
+        updated_at: { type: integer }
     Template:
       type: object
       required: [id, object, name, spec, created_at, updated_at]

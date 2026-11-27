@@ -10,7 +10,8 @@ import { envdArchive, treeArchive } from '../../backends/envd-binary.ts'
 import type { GpuInfo, TemplateSpec } from '../../store/types.ts'
 import { parseNvidiaSmi } from '../gpus.ts'
 import { createEnsureImage, type EnsureImage } from '../images.ts'
-import type { Driver, Handle, ImageInfo, NetworkGuard } from '../driver.ts'
+import type { Driver, Handle, ImageInfo, NetworkGuard, StartContext } from '../driver.ts'
+import { cacheKey, cacheTag, CACHE_REPO, LABEL_BASE, LABEL_KEY, pruneList, type CacheImage } from '../template-cache.ts'
 
 const ENVD_PORT = '49983/tcp'
 const DEFAULT_WORKSPACE = '/workspace'
@@ -23,6 +24,8 @@ export const volumeName = (id: string) => `agentry-sbx-${id}-workspace`
 
 /** Docker API calls give up after this; image pulls use a client without a timeout. */
 const DOCKER_TIMEOUT_MS = 60_000
+/** Every relayed request asks for the status; trust a recent `running` instead of inspecting over SSH each time. */
+const STATUS_TTL_MS = 15_000
 
 export function dockerClient(config: SandboxConfig, timeout: number | undefined = DOCKER_TIMEOUT_MS): Docker {
   const t = timeout === undefined ? {} : { timeout }
@@ -83,16 +86,47 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     return gpuCache
   }
 
-  async function envdEndpoint(handle: Handle): Promise<{ baseUrl: string; release?: () => void }> {
+  /** One resolved endpoint per container: callers of `envdEndpoint` share it (and its SSH tunnel) until the machine goes away. */
+  type ResolvedEndpoint = { baseUrl: string; close?: () => void }
+  const endpoints = new Map<string, Promise<ResolvedEndpoint>>()
+  const runningUntil = new Map<string, number>()
+
+  async function resolveEndpoint(handle: Handle): Promise<ResolvedEndpoint> {
     const info = await client.getContainer(handle.containerId!).inspect()
     if (config.envdReach === 'loopback') {
       const port = info.NetworkSettings.Ports?.[ENVD_PORT]?.find((b) => b.HostIp === '127.0.0.1')?.HostPort
       if (!port) throw new Error('envd port is not published on 127.0.0.1')
-      return options.reach ? options.reach(Number(port)) : { baseUrl: `http://127.0.0.1:${port}` }
+      if (!options.reach) return { baseUrl: `http://127.0.0.1:${port}` }
+      const reached = await options.reach(Number(port))
+      return { baseUrl: reached.baseUrl, ...(reached.release ? { close: reached.release } : {}) }
     }
     const ip = info.NetworkSettings.Networks?.[handle.network ?? '']?.IPAddress
     if (!ip) throw new Error('sandbox has no container IP')
     return { baseUrl: `http://${ip}:49983` }
+  }
+
+  async function envdEndpoint(handle: Handle): Promise<{ baseUrl: string; release?: () => void }> {
+    const id = handle.containerId!
+    let pending = endpoints.get(id)
+    if (!pending) {
+      pending = resolveEndpoint(handle)
+      endpoints.set(id, pending)
+      // A failed resolution must not stay cached: the next call may find a restarted container.
+      void pending.catch(() => { if (endpoints.get(id) === pending) endpoints.delete(id) })
+    }
+    const { baseUrl } = await pending
+    // No per-request `release`: the endpoint (and a tunneled reach) belongs to the container, not the caller.
+    return { baseUrl }
+  }
+
+  /** Ends a container's shared reach when the machine is stopped, removed or replaced. */
+  function forgetEndpoint(containerId: string | undefined): void {
+    if (!containerId) return
+    runningUntil.delete(containerId)
+    const pending = endpoints.get(containerId)
+    if (!pending) return
+    endpoints.delete(containerId)
+    void pending.then((ep) => ep.close?.(), () => {})
   }
 
   async function waitHealthy(handle: Handle): Promise<void> {
@@ -153,18 +187,94 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     if (volume) await client.getVolume(volume).remove().catch((e: unknown) => { if (!isNotFound(e)) throw e })
   }
 
+
+  // ---- template image cache ----
+
+  const cacheLog = (msg: string, e?: unknown) => console.log(`[agentry-sandbox] template cache: ${msg}${e === undefined ? '' : ` (${(e as Error).message ?? String(e)})`}`)
+  /** When each cache image was last used by this process; images not seen yet count from their creation time. */
+  const cacheUsed = new Map<string, number>()
+  const committing = new Set<string>()
+  const imageExists = async (ref: string): Promise<boolean> => {
+    try {
+      await client.getImage(ref).inspect()
+      return true
+    } catch (e) {
+      if (isNotFound(e)) return false
+      throw e
+    }
+  }
+
+  /** The cache key for a create and whether its image exists; undefined when the cache is off or cannot be consulted (never fails a create). */
+  async function cacheLookup(spec: TemplateSpec, ctx: StartContext | undefined): Promise<{ key: string; base: string; hit: boolean } | undefined> {
+    if (!config.templateCache || !ctx?.runtimeRef) return undefined
+    try {
+      const base = (await client.getImage(spec.image ?? config.defaultImage).inspect()).Id
+      const arch = ((await client.version()) as { Arch?: string }).Arch ?? ''
+      const key = cacheKey({ baseImage: base, packages: spec.packages, runtimeRef: `${ctx.runtimeRef}@${arch}` })
+      return { key, base, hit: await imageExists(cacheTag(key)) }
+    } catch (e) {
+      cacheLog('lookup failed, creating without it', e)
+      return undefined
+    }
+  }
+
+  /** Removes cache images beyond the newest `templateCacheMax`; an image a container still uses is refused by Docker and stays. */
+  async function pruneCache(): Promise<void> {
+    const listed = await client.listImages({ filters: { label: [LABEL_KEY] } })
+    const images: (CacheImage & { tag: string })[] = listed.flatMap((i) => {
+      const tag = (i.RepoTags ?? []).find((t) => t.startsWith(`${CACHE_REPO}:`))
+      return tag ? [{ id: i.Id, tag, usedAt: cacheUsed.get(i.Id) ?? i.Created * 1000 }] : []
+    })
+    for (const old of pruneList(images, config.templateCacheMax) as (CacheImage & { tag: string })[]) {
+      await client.getImage(old.tag).remove().then(
+        () => cacheUsed.delete(old.id),
+        (e: unknown) => {
+          if (isNotFound(e) || (e as { statusCode?: number }).statusCode === 409) return
+          throw e
+        },
+      )
+    }
+  }
+
+  async function commitCache(handle: Handle): Promise<void> {
+    const key = handle.cacheKey
+    if (!key || handle.cache !== 'miss' || !handle.containerId || committing.has(key)) return
+    committing.add(key)
+    try {
+      const tag = cacheTag(key)
+      if (await imageExists(tag)) return
+      // Container labels are copied into a commit: blank the sandbox and owner ones so the image names nobody.
+      await puller.getContainer(handle.containerId).commit({
+        repo: CACHE_REPO,
+        tag: tag.slice(CACHE_REPO.length + 1),
+        comment: 'agentry template cache',
+        pause: true,
+        changes: [`LABEL ${LABEL_KEY}=${key}`, `LABEL ${LABEL_BASE}=${handle.cacheBase ?? ''}`, 'LABEL agentry.managed=""', 'LABEL agentry.sandbox.id=""', 'LABEL agentry.sandbox.owner=""'],
+      })
+      await pruneCache().catch((e: unknown) => cacheLog('prune failed', e))
+    } catch (e) {
+      cacheLog('commit failed, the sandbox is unaffected', e)
+    } finally {
+      committing.delete(key)
+    }
+  }
+
   const labels = (id: string, owner: string) => ({ 'agentry.managed': 'true', 'agentry.sandbox.id': id, 'agentry.sandbox.owner': owner })
 
   /** Creates and boots the container on `volume`. A failure removes the container (and the volume when `ownsVolume`). */
-  async function makeContainer(id: string, owner: string, spec: TemplateSpec, gpuIds: string[], volume: string, ownsVolume: boolean, provisioned = 'false', recreated = false): Promise<Handle> {
+  async function makeContainer(id: string, owner: string, spec: TemplateSpec, gpuIds: string[], volume: string, ownsVolume: boolean, provisioned = 'false', recreated = false, ctx?: StartContext): Promise<Handle> {
     const image = spec.image ?? config.defaultImage
+    const progress = ctx?.progress
+    if (progress && !(await imageExists(image).catch(() => true))) progress({ stage: 'pulling_image' })
     await ensureImage(image)
+    progress?.({ stage: 'starting' })
+    const cache = await cacheLookup(spec, ctx)
     const net = await network.networkFor(owner)
     const cpus = spec.resources?.cpus ?? config.resources.cpus
     const memory = spec.resources?.memoryMb ? spec.resources.memoryMb * 1024 * 1024 : config.resources.memoryBytes
-    const container = await client.createContainer({
+    const createFrom = (from: string) => client.createContainer({
       name: containerName(id),
-      Image: image,
+      Image: from,
       Entrypoint: ['/opt/agentry/envd', '--isnotfc', '--no-cgroups', '--port', '49983'],
       Cmd: [],
       User: 'root',
@@ -186,9 +296,23 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
         ...(config.envdReach === 'loopback' ? { PortBindings: { [ENVD_PORT]: [{ HostIp: '127.0.0.1', HostPort: '' }] } } : {}),
       },
     })
+    let hit = cache?.hit === true
+    let container
+    if (hit) {
+      try {
+        container = await createFrom(cacheTag(cache!.key))
+        cacheUsed.set((await client.getImage(cacheTag(cache!.key)).inspect()).Id, Date.now())
+      } catch (e) {
+        // Pruned between the lookup and now: build the base the long way.
+        cacheLog('cached image vanished, creating from the base image', e)
+        hit = false
+      }
+    }
+    container ??= await createFrom(image)
+    const cacheHandle: Handle = cache ? { cacheKey: cache.key, cacheBase: cache.base, cache: hit ? 'hit' : 'miss' } : {}
     try {
       await container.putArchive(await envdArchive(client, config.envdImage, ensureImage), { path: '/' })
-      return await boot({ containerId: container.id, volume, network: net, provisioned, ...(recreated ? { recreated: 'true' } : {}) }, spec)
+      return await boot({ containerId: container.id, volume, network: net, provisioned, ...cacheHandle, ...(recreated ? { recreated: 'true' } : {}) }, spec)
     } catch (e) {
       // Fail closed: nothing half-made stays behind, running or not.
       await removeAll(container.id, ownsVolume ? volume : undefined).catch(() => {})
@@ -233,8 +357,10 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     async create(id, owner, spec, ctx) {
       const volume = volumeName(id)
       await client.createVolume({ Name: volume, Labels: labels(id, owner) })
-      return makeContainer(id, owner, spec, ctx.gpuIds, volume, true)
+      return makeContainer(id, owner, spec, ctx.gpuIds, volume, true, 'false', false, ctx)
     },
+
+    commitCache,
 
     async start(id, handle, spec, ctx) {
       try {
@@ -255,11 +381,20 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     },
 
     async stop(handle) {
-      await stopContainer(handle.containerId!)
+      try {
+        await stopContainer(handle.containerId!)
+      } finally {
+        forgetEndpoint(handle.containerId)
+      }
     },
 
     async destroy(id, handle, { keepWorkspace }) {
-      await removeAll(handle.containerId ?? containerName(id), keepWorkspace ? undefined : (handle.volume ?? volumeName(id)))
+      const container = handle.containerId ?? containerName(id)
+      try {
+        await removeAll(container, keepWorkspace ? undefined : (handle.volume ?? volumeName(id)))
+      } finally {
+        forgetEndpoint(container)
+      }
     },
 
     async maintain(_id, handle, spec) {
@@ -270,11 +405,23 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
       await network.removeOwnerNetwork?.(owner)
     },
 
+    async close() {
+      for (const id of [...endpoints.keys()]) forgetEndpoint(id)
+    },
+
     async status(handle) {
+      const id = handle.containerId ?? ''
+      if ((runningUntil.get(id) ?? 0) > Date.now()) return 'running'
       try {
-        return (await client.getContainer(handle.containerId!).inspect()).State.Running ? 'running' : 'stopped'
+        const running: boolean = (await client.getContainer(id).inspect()).State.Running
+        if (running) runningUntil.set(id, Date.now() + STATUS_TTL_MS)
+        else runningUntil.delete(id)
+        return running ? 'running' : 'stopped'
       } catch (e) {
-        if (isNotFound(e)) return 'missing'
+        if (isNotFound(e)) {
+          runningUntil.delete(id)
+          return 'missing'
+        }
         throw e
       }
     },

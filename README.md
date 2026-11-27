@@ -26,6 +26,15 @@ Hardened Docker sandboxes on demand for Agentry agents. Each sandbox is one cont
    | `AGENTRY_SANDBOX_DEFAULT_IMAGE` / `_ENVD_IMAGE` | `ghcr.io/fakhrulfaiz/agentry-sandbox:1` / `ghcr.io/fakhrulfaiz/agentry-envd:envd-v0.6.13` | |
    | `AGENTRY_SANDBOX_DSH_RUNTIME_IMAGE` | `ghcr.io/fakhrulfaiz/agentry-dsh-runtime:0.2.2-rc.1` | DSH remote helper injected into each sandbox; `none` disables (the Agentry API's tools then cannot run there) |
 
+   **Template cache** (Docker and Docker-over-SSH places): the first create from a template makes the `agent` user, installs the template's packages and copies the DSH runtime, then saves that base as the image `agentry-template-cache:<key>` before running the template's files and setup commands. Later creates with the same base image, packages and runtime start from it and only run files and setup commands. The key is the sha256 of the resolved base image id, the sorted packages, the runtime ref and a bootstrap version, so changing any of them is a miss. Nothing secret is saved: the commit happens before files and setup run, template `env` is never written to disk, the workspace is a volume (not part of a commit), the sandbox and owner labels are blanked, and the envd token is derived, not stored. A failed commit is logged and never fails the create. Cache images are removed oldest-used first beyond the maximum; Docker refuses to remove one a container still uses, so it stays.
+
+   | Variable | Default | |
+   |---|---|---|
+   | `AGENTRY_SANDBOX_TEMPLATE_CACHE` | `on` | `off` disables the cache |
+   | `AGENTRY_SANDBOX_TEMPLATE_CACHE_MAX` | `10` | cache images kept per Docker daemon |
+
+   **Create progress:** while a sandbox is `provisioning`, `GET /v1/sandboxes/{id}` and the list carry `progress`: `{ "stage": "pulling_image" | "starting" | "preparing" | "installing_packages" | "copying_runtime" | "writing_files" | "running_setup" | "finishing", "step", "steps", "detail", "updated_at" }`. `step`, `steps` and `detail` (the setup command, cut to 120 characters) come with `running_setup` only. It is removed when the sandbox leaves `provisioning`.
+
    **Limits** (so no caller or agent can run away with resources; going over one answers 429 `quota_exceeded` with the reason):
 
    | Variable | Default | |

@@ -44,6 +44,14 @@ jobs:
           cache-to: type=gha,mode=max,scope=sandbox
       - uses: docker/build-push-action@v6
         with:
+          context: images/sandbox-browser
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/fakhrulfaiz/agentry-sandbox-browser:1
+          cache-from: type=gha,scope=sandbox-browser
+          cache-to: type=gha,mode=max,scope=sandbox-browser
+      - uses: docker/build-push-action@v6
+        with:
           context: images/netguard
           platforms: linux/amd64,linux/arm64
           push: true

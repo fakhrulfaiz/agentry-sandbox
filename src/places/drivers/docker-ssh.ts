@@ -19,8 +19,6 @@ import { createTunnels, parseSshTarget, sshConnectOptions } from '../ssh.ts'
 import { createEnsureImage } from '../images.ts'
 import { createDockerDriver } from './docker.ts'
 
-const DOCKER_TIMEOUT_MS = 60_000
-
 export function createDockerSshDriver(baseConfig: SandboxConfig, place: { target: string; hostKey?: string; privateKey: string; /** Connect without a pinned key to learn it (the admin's connection test). */ allowUnpinnedProbe?: boolean }): Driver {
   const config: SandboxConfig = { ...baseConfig, envdReach: 'loopback' }
   const target = parseSshTarget(place.target)
@@ -37,9 +35,12 @@ export function createDockerSshDriver(baseConfig: SandboxConfig, place: { target
     },
   }
   const sshOptions = () => sshConnectOptions({ privateKey: place.privateKey, pinned, hooks })
-  const dockerOver = (timeout: number | undefined) => new Docker({ protocol: 'ssh', host: target.host, port: target.port, username: target.username, sshOptions: sshOptions(), ...(timeout === undefined ? {} : { timeout }) })
-  const client = dockerOver(DOCKER_TIMEOUT_MS)
-  const puller = dockerOver(undefined)
+  // docker-modem's SSH agent returns an ssh2 channel as the HTTP socket. Node
+  // calls `setTimeout()` on connected sockets, which that channel does not
+  // implement, so no request timeout can be used on this transport.
+  const dockerOver = () => new Docker({ protocol: 'ssh', host: target.host, port: target.port, username: target.username, sshOptions: sshOptions() })
+  const client = dockerOver()
+  const puller = dockerOver()
   const tunnels = pinned ? createTunnels({ target, privateKey: place.privateKey, hostKey: pinned }) : undefined
 
   const ensure = createEnsureImage(client, puller)
@@ -66,11 +67,12 @@ export function createDockerSshDriver(baseConfig: SandboxConfig, place: { target
     },
     observedHostKey: () => observed,
     async close() {
+      await inner.close?.()
       await tunnels?.closeAll()
     },
   }
   // Everything but probe/close runs only on a pinned connection, and a host key mismatch surfaces as HostKeyChangedError.
-  for (const name of ['discoverGpus', 'create', 'start', 'stop', 'destroy', 'status', 'envdEndpoint', 'listManaged', 'maintain', 'releaseOwner', 'describeImage'] as const) {
+  for (const name of ['discoverGpus', 'create', 'start', 'stop', 'destroy', 'status', 'envdEndpoint', 'listManaged', 'maintain', 'releaseOwner', 'describeImage', 'commitCache'] as const) {
     const fn = inner[name] as ((...a: unknown[]) => Promise<unknown>) | undefined
     if (!fn) continue
     ;(driver as unknown as Record<string, unknown>)[name] = async (...args: unknown[]) => {

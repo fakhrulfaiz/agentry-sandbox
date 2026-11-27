@@ -13,13 +13,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import ssh2 from 'ssh2'
 import { fingerprint } from '../../src/places/ssh.ts'
+import { generateSshKeyPair } from './ssh-keys.ts'
 
 const { Server, utils } = ssh2
 const STATUS = utils.sftp.STATUS_CODE
 
-export const hostKey = utils.generateKeyPairSync('ed25519')
-export const otherHostKey = utils.generateKeyPairSync('ed25519')
-export const userKey = utils.generateKeyPairSync('ed25519')
+export const hostKey = generateSshKeyPair(utils)
+export const otherHostKey = generateSshKeyPair(utils)
+export const userKey = generateSshKeyPair(utils)
 export const fpOf = (publicKey: string) => fingerprint(Buffer.from(publicKey.split(/\s+/u)[1]!, 'base64'))
 
 interface Proc {
@@ -132,6 +133,22 @@ export async function startMachine(opts: { host?: string } = {}): Promise<Machin
   type R = { code: number; out?: string; err?: string }
   const ok = (out = ''): R => ({ code: 0, out })
   const fail = (err = '', code = 1): R => ({ code, err })
+
+  /** Real listeners on this test host, so a fake machine cannot pick a port the OS already uses. */
+  const hostListeningPorts = (): Set<number> => {
+    const ports = new Set<number>()
+    for (const file of ['/proc/net/tcp', '/proc/net/tcp6']) {
+      let text: string
+      try { text = fs.readFileSync(file, 'utf8') } catch { continue }
+      for (const line of text.split('\n').slice(1)) {
+        const cols = line.trim().split(/\s+/u)
+        if (cols[3] !== '0A') continue // TCP_LISTEN
+        const port = Number.parseInt(cols[1]?.split(':')[1] ?? '', 16)
+        if (Number.isInteger(port) && port > 0) ports.add(port)
+      }
+    }
+    return ports
+  }
 
   async function startEnvd(argv: string[], logFile: string, pidFile: string): Promise<R> {
     const port = Number(argv[argv.indexOf('--port') + 1])
@@ -272,7 +289,7 @@ export async function startMachine(opts: { host?: string } = {}): Promise<Machin
       case 'tail':
         return fs.existsSync(a[a.length - 1]!) ? ok(fs.readFileSync(a[a.length - 1]!, 'utf8')) : fail()
       case 'ss': {
-        const ports = new Set([...m.busy, ...[...m.procs.values()].filter((p) => p.port).map((p) => p.port)])
+        const ports = new Set([...m.busy, ...hostListeningPorts(), ...[...m.procs.values()].filter((p) => p.port).map((p) => p.port)])
         return ok(`State Recv-Q Send-Q Local Address:Port Peer Address:Port\n${[...ports].map((p) => `LISTEN 0 128 0.0.0.0:${String(p)} 0.0.0.0:*`).join('\n')}\n`)
       }
       case 'kill': {

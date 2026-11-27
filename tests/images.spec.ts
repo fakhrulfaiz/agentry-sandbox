@@ -26,6 +26,7 @@ const NAMES = [
   'ghcr.io/fakhrulfaiz/agentry-sandbox:1',
   'ghcr.io/fakhrulfaiz/agentry-netguard:1',
 ]
+const BROWSER_IMAGE = 'ghcr.io/fakhrulfaiz/agentry-sandbox-browser:1'
 
 describe('image names', () => {
   it('config defaults name the ghcr.io/fakhrulfaiz images', () => {
@@ -35,9 +36,9 @@ describe('image names', () => {
     expect(c.defaultImage).toBe(NAMES[2])
   })
 
-  it('images-build.sh builds every default image name', () => {
+  it('images-build.sh builds every default image name and the browser image', () => {
     const script = readFileSync(new URL('../scripts/images-build.sh', import.meta.url), 'utf8')
-    for (const n of NAMES) expect(script).toContain(`-t ${n} `)
+    for (const n of [...NAMES, BROWSER_IMAGE]) expect(script).toContain(`-t ${n} `)
   })
 
   it('the envd and sandbox Dockerfiles follow TARGETARCH, and images.yml publishes every name for both architectures', () => {
@@ -45,17 +46,25 @@ describe('image names', () => {
     expect(read('images/envd/Dockerfile')).toContain('GOARCH=${TARGETARCH}')
     expect(read('images/sandbox/Dockerfile')).toContain('TARGETARCH')
     const wf = read('.github/workflows/images.yml')
-    for (const n of NAMES) expect(wf).toContain(n)
+    for (const n of [...NAMES, BROWSER_IMAGE]) expect(wf).toContain(n)
+    expect(read('images/sandbox-browser/Dockerfile')).toContain(`FROM ${NAMES[2]}`)
     expect(wf).toContain('linux/amd64,linux/arm64')
   })
 })
 
-describe('sandbox Dockerfile', () => {
-  it('ships the pinned Playwright MCP and its Chromium in a shared folder, and lists them', () => {
+describe('sandbox Dockerfiles', () => {
+  it('keeps the standard image slim', () => {
     const f = readFileSync(new URL('../images/sandbox/Dockerfile', import.meta.url), 'utf8')
+    expect(f).not.toContain('PLAYWRIGHT_MCP_VERSION')
+    expect(f).not.toContain('chromium')
+    expect(f).toMatch(/org\.agentry\.tools="git curl jq build-essential sudo"/)
+  })
+
+  it('ships the pinned Playwright MCP and its Chromium in the browser image, and lists them', () => {
+    const f = readFileSync(new URL('../images/sandbox-browser/Dockerfile', import.meta.url), 'utf8')
     expect(f).toContain('ARG PLAYWRIGHT_MCP_VERSION=0.0.80')
     expect(f).toContain('npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}"')
-    expect(f).toContain('ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright')
+    expect(f).toMatch(/PLAYWRIGHT_BROWSERS_PATH=\/opt\/ms-playwright/)
     expect(f).toContain('install --with-deps chromium')
     // Playwright writes its own state under ~/.cache/ms-playwright; linking it to the read-only folder breaks it.
     expect(f).not.toMatch(/ln -s \/opt\/ms-playwright/)

@@ -39,8 +39,13 @@ import { dockerClient } from './docker.ts'
 type Arch = 'amd64' | 'arm64'
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/u
-const PORT_FROM = 49_300
+/**
+ * envd ports sit below Linux's ephemeral range (32768-60999 by default): a port there can be the local end of
+ * an outbound connection, which a listening-socket check does not see, and envd then fails with EADDRINUSE.
+ */
+const PORT_FROM = 30_000
 const PORT_SPAN = 600
+const PORT_LAST = 32_767
 const DEFAULT_WORKSPACE = '/workspace'
 /** The file in a workspace this driver created; it holds the sandbox id. */
 const MARKER = '.agentry-sandbox'
@@ -49,7 +54,7 @@ const OWNED_NAME = /^sandbox-[A-Za-z0-9_-]+$/u
 const PROTECTED = new Set(['/', '/bin', '/boot', '/dev', '/etc', '/home', '/lib', '/lib64', '/opt', '/proc', '/root', '/run', '/sbin', '/srv', '/sys', '/tmp', '/usr', '/var'])
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** The first port tried for a sandbox: 49300 + hash(id) % 600. */
+/** The first port tried for a sandbox: 30000 + hash(id) % 600. */
 export function portBase(id: string): number {
   return PORT_FROM + (createHash('sha256').update(id).digest().readUInt32BE(0) % PORT_SPAN)
 }
@@ -232,7 +237,7 @@ export function createSshMachineDriver(
   async function freePort(d: Dirs, id: string, prefer?: number): Promise<number> {
     const taken = new Set([...(await listening()), ...(await readMetas(d)).filter((m) => m.id !== id).map((m) => m.port)])
     if (prefer !== undefined && !taken.has(prefer)) return prefer
-    for (let p = portBase(id); p <= 65_535; p++) if (!taken.has(p)) return p
+    for (let p = portBase(id); p <= PORT_LAST; p++) if (!taken.has(p)) return p
     throw new Error(`no free port for envd on ${target.host}`)
   }
 

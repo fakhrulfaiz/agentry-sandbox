@@ -19,6 +19,22 @@ export interface TemplateSpec {
   gpus?: number | 'all'
 }
 
+/** Where a provisioning sandbox is in its setup. `step`, `steps` and `detail` are set for `running_setup` only. */
+export type ProgressStage = 'pulling_image' | 'starting' | 'preparing' | 'installing_packages' | 'copying_runtime' | 'writing_files' | 'running_setup' | 'finishing'
+
+export interface ProgressUpdate {
+  stage: ProgressStage
+  step?: number
+  steps?: number
+  /** The setup command, cut to 120 characters (never env values). */
+  detail?: string
+}
+
+export interface Progress extends ProgressUpdate {
+  /** Epoch milliseconds. */
+  updatedAt: number
+}
+
 export interface SandboxRecord {
   id: string
   owner: string
@@ -33,6 +49,8 @@ export interface SandboxRecord {
   /** Sealed (encrypted) backend secrets for this sandbox. */
   handleSecrets: string | null
   error: string | null
+  /** Set while `state` is `provisioning`; null otherwise. */
+  progress: Progress | null
   /** Epoch milliseconds. */
   createdAt: number
   startedAt: number | null
@@ -71,7 +89,7 @@ export interface PlaceRecord {
 
 export type PlacePatch = Partial<Omit<PlaceRecord, 'id' | 'createdAt'>>
 
-export type SandboxPatch = Partial<Pick<SandboxRecord, 'name' | 'template' | 'state' | 'handle' | 'handleSecrets' | 'error' | 'startedAt' | 'lastUsedAt'>>
+export type SandboxPatch = Partial<Pick<SandboxRecord, 'name' | 'template' | 'state' | 'handle' | 'handleSecrets' | 'error' | 'progress' | 'startedAt' | 'lastUsedAt'>>
 export type TemplatePatch = Partial<Pick<TemplateRecord, 'name' | 'spec' | 'updatedAt'>>
 
 export interface Store {

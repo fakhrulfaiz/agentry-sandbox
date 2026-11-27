@@ -11,4 +11,5 @@ export DOCKER_CONFIG=$cfg
 docker build -t ghcr.io/fakhrulfaiz/agentry-envd:envd-v0.6.13 images/envd
 docker build -t ghcr.io/fakhrulfaiz/agentry-dsh-runtime:0.2.2-rc.1 images/dsh-runtime
 docker build -t ghcr.io/fakhrulfaiz/agentry-sandbox:1 images/sandbox
+docker build -t ghcr.io/fakhrulfaiz/agentry-sandbox-browser:1 images/sandbox-browser
 docker build -t ghcr.io/fakhrulfaiz/agentry-netguard:1 images/netguard
