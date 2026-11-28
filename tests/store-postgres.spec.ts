@@ -16,7 +16,7 @@ describe.skipIf(!url)('postgres', () => {
     pools.push(pool)
     await migrate(pool)
     // Test database only: start every case from empty tables.
-    await pool.query('TRUNCATE sandboxes, templates, places')
+    await pool.query('TRUNCATE sandboxes, templates, places, snapshots')
     return createPostgresStore(pool, { ownsPool: false })
   })
   it('migration 0003 maps backend docker to local', async () => {

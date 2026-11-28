@@ -7,7 +7,7 @@ import Docker from 'dockerode'
 import type { SandboxConfig } from '../../config.ts'
 import { createEnvdClient } from '../../envd/client.ts'
 import { envdArchive, treeArchive } from '../../backends/envd-binary.ts'
-import type { GpuInfo, TemplateSpec } from '../../store/types.ts'
+import type { GpuInfo, SnapshotLevel, TemplateSpec } from '../../store/types.ts'
 import { parseNvidiaSmi } from '../gpus.ts'
 import { createEnsureImage, type EnsureImage } from '../images.ts'
 import type { Driver, Handle, ImageInfo, NetworkGuard, StartContext } from '../driver.ts'
@@ -21,6 +21,8 @@ const CAP_ADD = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'KILL', 'SETGID', 
 
 export const containerName = (id: string) => `agentry-sbx-${id}`
 export const volumeName = (id: string) => `agentry-sbx-${id}-workspace`
+export const snapshotVolumeName = (snapId: string) => `agentry-snap-${snapId}`
+export const snapshotImageName = (snapId: string) => `agentry-snap:${snapId}`
 
 /** Docker API calls give up after this; image pulls use a client without a timeout. */
 const DOCKER_TIMEOUT_MS = 60_000
@@ -320,9 +322,63 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     }
   }
 
+  // ---- snapshots (native: a volume copy, and a committed image for `disk`) ----
+
+  /** Copies one volume's files onto another with a short-lived helper container (no network, no extra privileges), emptying the target first when `clear`. */
+  async function copyVolume(image: string, from: string, to: string, clear: boolean, owner: string): Promise<void> {
+    await ensureImage(image)
+    const helper = await client.createContainer({
+      Image: image,
+      Entrypoint: ['/bin/sh', '-c'],
+      Cmd: [`${clear ? 'find /to -mindepth 1 -delete && ' : ''}cp -a /from/. /to/`],
+      User: 'root',
+      Labels: { 'agentry.helper': 'snapshot-copy', 'agentry.sandbox.owner': owner },
+      NetworkDisabled: true,
+      HostConfig: {
+        Privileged: false,
+        CapDrop: ['ALL'],
+        CapAdd: ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'MKNOD'],
+        NetworkMode: 'none',
+        Memory: 512 * 1024 * 1024,
+        PidsLimit: 64,
+        Runtime: config.runtime,
+        Mounts: [
+          { Type: 'volume', Source: from, Target: '/from', ReadOnly: true },
+          { Type: 'volume', Source: to, Target: '/to' },
+        ],
+      },
+    })
+    try {
+      await helper.start()
+      const done = await helper.wait()
+      if (done.StatusCode !== 0) {
+        const log = demux(await helper.logs({ stdout: true, stderr: true })).trim().slice(-300)
+        throw new Error(`copying the workspace volume failed (exit ${String(done.StatusCode)})${log ? `: ${log}` : ''}`)
+      }
+    } finally {
+      await helper.remove({ force: true }).catch(() => {})
+    }
+  }
+
+  const imageOf = (spec: TemplateSpec) => spec.image ?? config.defaultImage
+  const sizeOfVolume = async (volume: string): Promise<number | undefined> => {
+    try {
+      const v = (await client.getVolume(volume).inspect()) as { UsageData?: { Size?: number } }
+      const size = v.UsageData?.Size
+      return typeof size === 'number' && size >= 0 ? size : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  async function dropSnapshotParts(handle: Handle): Promise<void> {
+    if (handle.image) await client.getImage(handle.image).remove({ force: true }).catch((e: unknown) => { if (!isNotFound(e)) throw e })
+    if (handle.volume) await client.getVolume(handle.volume).remove().catch((e: unknown) => { if (!isNotFound(e)) throw e })
+  }
+
   return {
     kind: options.kind ?? 'docker',
-    capabilities: { persistent: true, reset: true, keepFilesOnReset: true, isolated: true, network: true, resources: true, gpu: true, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] },
+    capabilities: { snapshots: ['workspace', 'disk'] satisfies SnapshotLevel[], persistent: true, reset: true, keepFilesOnReset: true, isolated: true, network: true, resources: true, gpu: true, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] },
 
     async probe() {
       try {
@@ -361,6 +417,61 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     },
 
     commitCache,
+
+    async snapshot(id, handle, spec, { snapId, level }) {
+      const volume = snapshotVolumeName(snapId)
+      const owner = (await client.getContainer(handle.containerId!).inspect()).Config.Labels['agentry.sandbox.owner'] ?? ''
+      const out: Handle = { volume }
+      try {
+        await client.createVolume({ Name: volume, Labels: { 'agentry.snapshot.id': snapId, 'agentry.sandbox.owner': owner } })
+        if (level === 'disk') {
+          // `pause` keeps the files consistent during the commit; container labels are copied into a commit, so the sandbox and owner ones are blanked.
+          const [repo, tag] = snapshotImageName(snapId).split(':') as [string, string]
+          await puller.getContainer(handle.containerId!).commit({
+            repo,
+            tag,
+            comment: 'agentry snapshot',
+            pause: true,
+            changes: [`LABEL agentry.snapshot.id=${snapId}`, 'LABEL agentry.managed=""', 'LABEL agentry.sandbox.id=""', 'LABEL agentry.sandbox.owner=""'],
+          })
+          out.image = snapshotImageName(snapId)
+        }
+        await copyVolume(out.image ?? imageOf(spec), handle.volume ?? volumeName(id), volume, false, owner)
+      } catch (e) {
+        await dropSnapshotParts(out).catch(() => {})
+        throw e
+      }
+      const size = await sizeOfVolume(volume)
+      return { handle: out, ...(size !== undefined ? { sizeBytes: size } : {}) }
+    },
+
+    async restoreSnapshot(id, handle, spec, snap, ctx) {
+      const info = await client.getContainer(handle.containerId!).inspect().catch((e: unknown) => { if (isNotFound(e)) return undefined; throw e })
+      const owner = info?.Config.Labels['agentry.sandbox.owner'] ?? ''
+      const volume = handle.volume ?? volumeName(id)
+      await removeAll(handle.containerId ?? containerName(id), undefined)
+      forgetEndpoint(handle.containerId)
+      const image = snap.handle.image ?? imageOf(spec)
+      await copyVolume(image, snap.handle.volume!, volume, true, owner)
+      // A disk snapshot comes back as its image (already provisioned); a workspace one on the template's image with the files put back.
+      return makeContainer(id, owner, snap.handle.image ? { ...spec, image: snap.handle.image } : spec, ctx.gpuIds, volume, false, snap.handle.image ? 'true' : 'false', true, { gpuIds: ctx.gpuIds, ...(ctx.progress ? { progress: ctx.progress } : {}) })
+    },
+
+    async createFromSnapshot(id, owner, spec, ctx, snap) {
+      const volume = volumeName(id)
+      await client.createVolume({ Name: volume, Labels: labels(id, owner) })
+      try {
+        await copyVolume(snap.handle.image ?? imageOf(spec), snap.handle.volume!, volume, false, owner)
+        return await makeContainer(id, owner, snap.handle.image ? { ...spec, image: snap.handle.image } : spec, ctx.gpuIds, volume, true, snap.handle.image ? 'true' : 'false', false, { gpuIds: ctx.gpuIds, ...(ctx.progress ? { progress: ctx.progress } : {}) })
+      } catch (e) {
+        await client.getVolume(volume).remove().catch(() => {})
+        throw e
+      }
+    },
+
+    async deleteSnapshot(snap) {
+      await dropSnapshotParts(snap.handle)
+    },
 
     async start(id, handle, spec, ctx) {
       try {

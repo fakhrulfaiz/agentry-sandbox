@@ -6,6 +6,7 @@ import { createPlaceRegistry, type DriverFactory, type PlaceRegistry } from '../
 import { loadConfig, type SandboxConfig } from '../../src/config.ts'
 import { createServer } from '../../src/http/server.ts'
 import { createSandboxService, type SandboxService } from '../../src/sandboxes.ts'
+import type { EnvdClient, EnvdClientOptions } from '../../src/envd/client.ts'
 import { createMemoryStore } from '../../src/store/memory.ts'
 import type { Store } from '../../src/store/types.ts'
 
@@ -27,12 +28,13 @@ export interface TestServer {
   call(path: string, init?: RequestInit & { owner?: string | null; key?: string | null }): Promise<Response>
 }
 
-export async function startServer(drivers: Record<string, DriverFactory> = {}): Promise<TestServer> {
+export async function startServer(drivers: Record<string, DriverFactory> = {}, opts: { config?: SandboxConfig; envdClient?: (o: EnvdClientOptions) => EnvdClient } = {}): Promise<TestServer> {
+  const cfg = opts.config ?? config
   const store = createMemoryStore()
   const backend = createFakeDriver()
-  const places = await createPlaceRegistry({ store, config, local: backend, drivers })
-  const service = createSandboxService({ store, places, config, provision: async (_d, _i, h) => h })
-  const server = createServer({ config, service, store, places })
+  const places = await createPlaceRegistry({ store, config: cfg, local: backend, drivers })
+  const service = createSandboxService({ store, places, config: cfg, provision: async (_d, _i, h) => h, ...(opts.envdClient ? { envdClient: opts.envdClient } : {}) })
+  const server = createServer({ config: cfg, service, store, places })
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
   const url = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`
   return {

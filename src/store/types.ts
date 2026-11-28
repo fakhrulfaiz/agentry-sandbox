@@ -89,6 +89,33 @@ export interface PlaceRecord {
 
 export type PlacePatch = Partial<Omit<PlaceRecord, 'id' | 'createdAt'>>
 
+export type SnapshotLevel = 'workspace' | 'disk' | 'memory'
+export type SnapshotState = 'saving' | 'ready' | 'failed'
+
+/** A saved copy of a sandbox at one moment; kept after the sandbox is deleted. */
+export interface SnapshotRecord {
+  id: string
+  owner: string
+  /** The sandbox it was taken from (kept after that sandbox is deleted). */
+  sandboxId: string
+  /** Id of the place the bytes live on, or `service` for the generic store (a file on the service host). */
+  place: string
+  level: SnapshotLevel
+  name: string
+  state: SnapshotState
+  /** The driver's (or the generic store's) record of where it is: volume, image, provider snapshot id, file name. */
+  handle: Record<string, string>
+  /** Sealed (encrypted) provider secrets for this snapshot. */
+  handleSecrets: string | null
+  sizeBytes: number | null
+  error: string | null
+  /** Epoch milliseconds. */
+  createdAt: number
+  expiresAt: number | null
+}
+
+export type SnapshotPatch = Partial<Pick<SnapshotRecord, 'name' | 'state' | 'handle' | 'handleSecrets' | 'sizeBytes' | 'error' | 'expiresAt'>>
+
 export type SandboxPatch = Partial<Pick<SandboxRecord, 'name' | 'template' | 'state' | 'handle' | 'handleSecrets' | 'error' | 'progress' | 'startedAt' | 'lastUsedAt'>>
 export type TemplatePatch = Partial<Pick<TemplateRecord, 'name' | 'spec' | 'updatedAt'>>
 
@@ -109,6 +136,20 @@ export interface Store {
     list(owner: string): Promise<TemplateRecord[]>
     update(id: string, owner: string, patch: TemplatePatch): Promise<TemplateRecord | undefined>
     delete(id: string, owner: string): Promise<boolean>
+  }
+  snapshots: {
+    insert(r: SnapshotRecord): Promise<void>
+    get(id: string, owner: string): Promise<SnapshotRecord | undefined>
+    /** Any owner's snapshot; only for internal bookkeeping (the expiry sweep, deleting a place's leftovers). */
+    getAny(id: string): Promise<SnapshotRecord | undefined>
+    /** One owner's snapshots, oldest first; `sandboxId` narrows to those taken from one sandbox. */
+    list(owner: string, opts?: { sandboxId?: string }): Promise<SnapshotRecord[]>
+    update(id: string, owner: string, patch: SnapshotPatch): Promise<SnapshotRecord | undefined>
+    delete(id: string, owner: string): Promise<boolean>
+    /** Every owner's snapshots (admin). */
+    listAll(): Promise<SnapshotRecord[]>
+    /** Snapshots whose `expiresAt` is at or before `at`, any owner. */
+    listExpired(at: number): Promise<SnapshotRecord[]>
   }
   places: {
     list(): Promise<PlaceRecord[]>

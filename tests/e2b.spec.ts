@@ -209,6 +209,59 @@ describe('e2b driver', () => {
   })
 })
 
+describe('e2b snapshots', () => {
+  const waitSnap = async (service: Awaited<ReturnType<typeof setup>>['service'], id: string) => {
+    for (let i = 0; i < 100; i++) {
+      const r = await service.getSnapshot('alice', id)
+      if (r.state !== 'saving') return r
+      await new Promise((r2) => setTimeout(r2, 10))
+    }
+    throw new Error('still saving')
+  }
+
+  it('offers disk and memory natively; the snapshot is an E2B template kept under an idempotency key', async () => {
+    const { e2b, service } = await setup()
+    expect(service.snapshotLevels('place_e2b')).toEqual(['disk', 'memory'])
+    const box = await service.create('alice', { name: 'box', place: 'place_e2b' })
+    const snap = await waitSnap(service, (await service.snapshot('alice', box.id, { level: 'memory', name: 'm' })).id)
+    expect(snap).toMatchObject({ state: 'ready', level: 'memory', place: 'place_e2b', handle: { e2bSnapshotId: expect.stringMatching(/^snap-e2b-/) } })
+    const [post] = e2b.bodies.filter((b) => b.key.endsWith('/snapshots'))
+    expect(post!.body).toEqual({ memory: true })
+    expect(post!.headers['idempotency-key']).toBe(snap.id)
+    expect(e2b.snapshots.size).toBe(1)
+  })
+
+  it('a new sandbox from it uses the snapshot as its template; restore swaps the E2B sandbox; delete removes the template', async () => {
+    const { e2b, store, service } = await setup()
+    const box = await service.create('alice', { name: 'box', place: 'place_e2b' })
+    const snap = await waitSnap(service, (await service.snapshot('alice', box.id, { level: 'disk' })).id)
+    const snapId = snap.handle.e2bSnapshotId!
+    const copy = await service.create('alice', { name: 'copy', place: 'place_e2b', snapshot: snap.id })
+    const creates = e2b.bodies.filter((b) => b.key === 'POST /v2/sandboxes').map((b) => (b.body as { templateID: string }).templateID)
+    expect(creates).toEqual(['tpl-1', snapId])
+    const before = (await store.sandboxes.getAny(box.id))!.handle.e2bId
+    await service.restore('alice', box.id, snap.id)
+    const after = (await store.sandboxes.getAny(box.id))!.handle.e2bId
+    expect(after).not.toBe(before)
+    expect(e2b.sandboxes.has(before!)).toBe(false)
+    expect(e2b.sandboxes.get(after!)!.metadata).toMatchObject({ 'agentry.sandbox.id': box.id, 'agentry.sandbox.owner': 'alice' })
+    expect(copy.state).toBe('running')
+    await service.deleteSnapshot('alice', snap.id)
+    expect(e2b.snapshots.size).toBe(0)
+  })
+
+  it('a 409 while pausing is retried once; 503 fails the snapshot as unavailable', async () => {
+    const { e2b, service } = await setup()
+    const box = await service.create('alice', { name: 'box', place: 'place_e2b' })
+    e2b.failNext(409)
+    expect((await waitSnap(service, (await service.snapshot('alice', box.id, { level: 'disk' })).id)).state).toBe('ready')
+    e2b.failNext(503)
+    const failed = await waitSnap(service, (await service.snapshot('alice', box.id, { level: 'disk' })).id)
+    expect(failed.state).toBe('failed')
+    expect(failed.error).toMatch(/unavailable/i)
+  })
+})
+
 describe('e2b final review 2', () => {
   const place = (e2b: { url: string; apiKey: string }, deps = {}) =>
     createE2bDriver({ apiKey: e2b.apiKey, template: 'tpl-1', apiUrl: e2b.url, sandboxHost: e2b.url, timeoutS: 600 }, deps)

@@ -51,6 +51,19 @@ export interface SandboxConfig {
   /** Most template cache images kept per Docker daemon. */
   templateCacheMax: number
   limits: Limits
+  snapshots: SnapshotConfig
+}
+
+/** Snapshot storage and limits. Without `dir` the generic workspace snapshots are off (HTTP 400 `snapshots_off`). */
+export interface SnapshotConfig {
+  /** Folder on the service host that holds the generic workspace snapshots; null when not set. */
+  dir: string | null
+  /** The most one generic snapshot may hold (bytes); a bigger one fails. */
+  maxBytes: number
+  /** Days a snapshot is kept before the sweep deletes it; 0 keeps them until deleted. */
+  days: number
+  /** Snapshots one owner may have (saving or ready); 0 turns saving off. */
+  maxPerOwner: number
 }
 
 const KEY_HASH = /^sha256:[0-9a-f]{64}$/
@@ -147,6 +160,12 @@ export function loadConfig(env: Env): SandboxConfig {
       maxCpus: integer(env, 'AGENTRY_SANDBOX_MAX_CPUS', 4),
       maxMemoryMb: integer(env, 'AGENTRY_SANDBOX_MAX_MEMORY_MB', 8192, 128),
       owners: ownerLimits(env),
+    },
+    snapshots: {
+      dir: env.AGENTRY_SANDBOX_SNAPSHOT_DIR?.trim() || null,
+      maxBytes: integer(env, 'AGENTRY_SANDBOX_SNAPSHOT_MAX_MB', 2048) * 1024 * 1024,
+      days: integer(env, 'AGENTRY_SANDBOX_SNAPSHOT_DAYS', 30, 0),
+      maxPerOwner: integer(env, 'AGENTRY_SANDBOX_MAX_SNAPSHOTS_PER_OWNER', 10, 0),
     },
   }
 }

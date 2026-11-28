@@ -3,7 +3,7 @@
  * call, can fail the next start, go unavailable, lose or invent sandboxes,
  * and point `envdEndpoint` at any URL (a fake envd).
  */
-import type { GpuInfo, TemplateSpec } from '../../store/types.ts'
+import type { GpuInfo, SnapshotLevel, TemplateSpec } from '../../store/types.ts'
 import type { Availability, Driver, Handle } from '../driver.ts'
 
 export interface FakeKnobs {
@@ -25,6 +25,11 @@ export interface FakeKnobs {
   failNextCreate(reason: string): void
   /** Makes every Docker-facing call fail like an unreachable daemon (undefined restores). */
   failConnections(message: string | undefined): void
+  /** The native snapshot levels the fake reports (default none); the snapshot methods exist either way. */
+  setSnapshotLevels(levels: SnapshotLevel[]): void
+  /** The native snapshots the fake holds, by snapshot id. */
+  snapshots: Map<string, { sandboxId: string; level: SnapshotLevel; secret?: string }>
+  failNextSnapshot(reason: string): void
 }
 
 export type FakeDriver = Driver & FakeKnobs
@@ -42,12 +47,49 @@ export function createFakeDriver(): FakeDriver {
   let availability: Availability = { ok: true, version: 'fake' }
   let baseUrl = 'http://127.0.0.1:1'
   const calls: string[] = []
+  const snapshots = new Map<string, { sandboxId: string; level: SnapshotLevel; secret?: string }>()
+  let snapshotFailure: string | undefined
+  const capabilities: Driver['capabilities'] = { persistent: true, reset: true, keepFilesOnReset: true, isolated: true, network: true, resources: false, gpu: false, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] }
   const gpuIds = new Map<string, string[]>()
   const idOf = (h: Handle) => h.id ?? ''
 
   return {
     kind: 'fake',
-    capabilities: { persistent: true, reset: true, keepFilesOnReset: true, isolated: true, network: true, resources: false, gpu: false, envdBuiltIn: false, runsAsRoot: true, templateFields: ['image', 'packages', 'setupCommands', 'env', 'network', 'files', 'resources'] },
+    capabilities,
+    snapshots,
+    setSnapshotLevels(levels) {
+      capabilities.snapshots = levels
+    },
+    failNextSnapshot(reason) {
+      snapshotFailure = reason
+    },
+    async snapshot(id, _handle, _spec, opts) {
+      down()
+      calls.push(`snapshot ${id} ${opts.level}`)
+      if (snapshotFailure !== undefined) {
+        const reason = snapshotFailure
+        snapshotFailure = undefined
+        throw new Error(reason)
+      }
+      snapshots.set(opts.snapId, { sandboxId: id, level: opts.level, secret: 'tok' })
+      return { handle: { fakeSnapshot: opts.snapId, 'secret.token': 'tok' }, sizeBytes: 1234 }
+    },
+    async restoreSnapshot(id, _handle, _spec, snap) {
+      down()
+      calls.push(`restoreSnapshot ${id} ${snap.id} ${snap.handle['secret.token'] ?? 'no-secret'}`)
+      boxes.set(id, { owner: boxes.get(id)?.owner ?? '', running: true })
+      return { id }
+    },
+    async createFromSnapshot(id, owner, _spec, _ctx, snap) {
+      down()
+      calls.push(`createFromSnapshot ${id} ${snap.id}`)
+      boxes.set(id, { owner, running: true })
+      return { id }
+    },
+    async deleteSnapshot(snap) {
+      calls.push(`deleteSnapshot ${snap.id}`)
+      snapshots.delete(snap.id)
+    },
     calls,
     gpuIds,
     failNextStart(reason) {
