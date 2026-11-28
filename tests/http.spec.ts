@@ -96,7 +96,7 @@ describe('HTTP API', () => {
     const r = await s.call('/v1/sandboxes', { method: 'POST', body: JSON.stringify({ name: 'box' }) })
     expect(r.status).toBe(503)
     expect((await json(r)).error).toMatchObject({ code: 'place_unavailable', message: expect.stringContaining('Docker is not reachable') })
-    expect((await json(await s.call('/v1/backends'))).data).toEqual([{ id: 'local', name: 'Local Docker', default: true, kind: 'fake', available: false, reason: 'Docker is not reachable', capabilities: expect.any(Object), default_image: { name: 'ghcr.io/fakhrulfaiz/agentry-sandbox:1' } }])
+    expect((await json(await s.call('/v1/backends'))).data).toEqual([{ id: 'local', name: 'Local Docker', default: true, kind: 'fake', available: false, reason: 'Docker is not reachable', capabilities: expect.any(Object), snapshots: [], default_image: { name: 'ghcr.io/fakhrulfaiz/agentry-sandbox:1' } }])
   })
 
   it('GET /v1/backends lists places default-first with gpus', async () => {
