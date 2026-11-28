@@ -7,7 +7,9 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import http from 'node:http'
-import { readFileSync } from 'node:fs'
+import { createReadStream, readFileSync } from 'node:fs'
+import { pipeline } from 'node:stream/promises'
+import { ArchiveError } from '../snapshots/archive.ts'
 import { fileURLToPath } from 'node:url'
 import { openSecrets, sealSecrets } from '../crypto/secrets.ts'
 import { HostKeyChangedError, type Driver } from '../places/driver.ts'
@@ -160,7 +162,7 @@ const sandboxToWire = (r: SandboxRecord, defaultImage: string) => ({
 const snapshotToWire = (s: SnapshotRecord) => ({
   id: s.id,
   object: 'snapshot',
-  sandbox_id: s.sandboxId,
+  sandbox_id: s.sandboxId || null,
   place: s.place,
   level: s.level,
   name: s.name,
@@ -229,7 +231,9 @@ export const ROUTES: Route[] = [
   { method: 'POST', openapi: '/v1/sandboxes/{id}/snapshots' },
   { method: 'POST', openapi: '/v1/sandboxes/{id}/restore' },
   { method: 'GET', openapi: '/v1/snapshots' },
+  { method: 'POST', openapi: '/v1/snapshots/import' },
   { method: 'GET', openapi: '/v1/snapshots/{id}' },
+  { method: 'GET', openapi: '/v1/snapshots/{id}/download' },
   { method: 'DELETE', openapi: '/v1/snapshots/{id}' },
   { method: 'GET', openapi: '/v1/sandboxes/{id}/envd/{path}' },
   { method: 'POST', openapi: '/v1/sandboxes/{id}/envd/{path}' },
@@ -607,6 +611,31 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
         return { status: 200, body: sandboxToWire(await service.reset(ctx.owner, id, { keepWorkspace: body.keep_workspace !== false }), config.defaultImage) }
       }
     }
+    if (a === 'snapshots' && id === 'import' && !action && method === 'POST') {
+      const queryName = query.get('name')
+      if (queryName !== null && queryName.length > 200) throw invalid('name must be at most 200 characters')
+      const len = ctx.req.headers['content-length']
+      const contentLength = typeof len === 'string' && /^\d+$/.test(len) ? Number(len) : undefined
+      try {
+        const rec = await service.importSnapshot(ctx.owner, ctx.req, { ...(queryName ? { name: queryName } : {}), ...(contentLength !== undefined ? { contentLength } : {}) })
+        return { status: 201, body: snapshotToWire(rec) }
+      } catch (e) {
+        if (e instanceof ArchiveError && e.tooLarge) ctx.res.setHeader('connection', 'close')
+        throw e
+      }
+    }
+    if (a === 'snapshots' && id && action === 'download' && rest.length === 0 && method === 'GET') {
+      const d = await service.snapshotDownload(ctx.owner, id)
+      const safe = (d.name.replace(/[^A-Za-z0-9._ -]+/g, '_').trim() || 'snapshot').slice(0, 100)
+      ctx.res.writeHead(200, {
+        'content-type': 'application/gzip',
+        'content-length': String(d.sizeBytes),
+        'content-disposition': `attachment; filename="${safe}.tar.gz"; filename*=UTF-8''${encodeURIComponent(d.name.slice(0, 100))}.tar.gz`,
+        'cache-control': 'no-store',
+      })
+      await pipeline(createReadStream(d.file), ctx.res).catch(() => {})
+      return 'handled'
+    }
     if (a === 'snapshots' && !action) {
       if (!id && method === 'GET') {
         const sandbox = query.get('sandbox')
@@ -716,6 +745,7 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
         if (e instanceof QuotaExceededError) return fail(res, 429, 'quota_exceeded', e.message)
         if (e instanceof SnapshotsOffError) return fail(res, 400, 'snapshots_off', e.message)
         if (e instanceof SnapshotNotReadyError) return fail(res, 409, 'snapshot_not_ready', e.message)
+        if (e instanceof ArchiveError) return fail(res, e.tooLarge ? 413 : 400, 'invalid_request', e.message)
         if (e instanceof LimitError) return fail(res, 400, 'invalid_request', e.message)
         const msg = e instanceof Error ? e.message : String(e)
         if (/sandbox/.test(url.pathname)) return fail(res, 409, 'sandbox_failed', msg)

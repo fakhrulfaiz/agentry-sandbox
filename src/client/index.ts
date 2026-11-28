@@ -68,7 +68,8 @@ export type WireSnapshotLevel = 'workspace' | 'disk' | 'memory'
 export interface WireSnapshot {
   id: string
   object: 'snapshot'
-  sandbox_id: string
+  /** Null for an uploaded snapshot. */
+  sandbox_id: string | null
   /** `service` for a workspace tar kept on the service host, else the place that holds it. */
   place: string
   level: WireSnapshotLevel

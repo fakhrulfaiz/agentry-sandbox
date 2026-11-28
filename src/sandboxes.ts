@@ -16,6 +16,9 @@ import type { Limits, SandboxConfig } from './config.ts'
 import { openSecrets, sealSecrets } from './crypto/secrets.ts'
 import { createEnvdClient, type EnvdClient, type EnvdClientOptions } from './envd/client.ts'
 import { envdToken } from './envd/token.ts'
+import { stat, rename } from 'node:fs/promises'
+import type { Readable } from 'node:stream'
+import { ArchiveError, acceptUpload, receiveUpload } from './snapshots/archive.ts'
 import { ensureSnapshotDir, removeSnapshotFile, removeStaleParts, snapshotFile } from './snapshots/files.ts'
 import { restoreWorkspace, saveWorkspace } from './snapshots/workspace-tar.ts'
 import { bootstrap } from './places/bootstrap.ts'
@@ -146,6 +149,10 @@ export interface SandboxService {
   getSnapshot(owner: string, snapId: string): Promise<SnapshotRecord>
   /** Removes the snapshot's bytes (or cancels a save in progress) and its record. */
   deleteSnapshot(owner: string, snapId: string): Promise<void>
+  /** The file behind a ready workspace snapshot, for a download (404, 400 for other levels, 409 when not ready). */
+  snapshotDownload(owner: string, snapId: string): Promise<{ file: string; name: string; sizeBytes: number }>
+  /** Keeps an uploaded tar (gzip or plain) as a new ready workspace snapshot with no source sandbox. */
+  importSnapshot(owner: string, body: Readable, opts?: { name?: string; contentLength?: number }): Promise<SnapshotRecord>
   /** Puts a snapshot back into a sandbox of the same owner. */
   restore(owner: string, id: string, snapId: string): Promise<SandboxRecord>
   /** The levels a snapshot of a sandbox on this place can have. */
@@ -943,6 +950,58 @@ export function createSandboxService(deps: {
       saving.get(snapId)?.abort()
       await dropBytes(snap)
       await store.snapshots.delete(snapId, owner)
+    },
+
+    async snapshotDownload(owner, snapId) {
+      const snap = await usableSnapshot(owner, snapId)
+      if (snap.level !== 'workspace' || snap.place !== 'service') throw new LimitError(`only a files-only (workspace) snapshot can be downloaded; this one is ${snap.level} on place '${snap.place}'`)
+      if (snaps.dir === null) throw new SnapshotsOffError()
+      const file = snapshotFile(snaps.dir, snap.id)
+      let size: number
+      try {
+        size = (await stat(file)).size
+      } catch {
+        throw new LimitError('the snapshot file is missing on the service host')
+      }
+      return { file, name: snap.name, sizeBytes: size }
+    },
+
+    async importSnapshot(owner, body, opts = {}) {
+      if (snaps.dir === null) throw new SnapshotsOffError()
+      if (snaps.maxPerOwner === 0) throw new QuotaExceededError('Saving snapshots is turned off.')
+      const mine = (await store.snapshots.list(owner)).filter((x) => x.state !== 'failed').length
+      if (mine >= snaps.maxPerOwner) throw new QuotaExceededError(`You already have ${String(mine)} snapshots (limit ${String(snaps.maxPerOwner)}). Delete one first.`)
+      if (opts.contentLength !== undefined && opts.contentLength > snaps.importMaxBytes) throw new ArchiveError(`the upload is larger than ${String(Math.floor(snaps.importMaxBytes / 1024 / 1024))} MB`, true)
+      await ensureSnapshotDir(snaps.dir)
+      const id = `snap_${randomBytes(16).toString('hex')}`
+      const file = snapshotFile(snaps.dir, id)
+      const part = `${file}.part`
+      await receiveUpload(body, part, snaps.importMaxBytes)
+      const size = await acceptUpload(part, snaps.importMaxBytes)
+      await rename(part, file)
+      const t = now()
+      const rec: SnapshotRecord = {
+        id,
+        owner,
+        sandboxId: '',
+        place: 'service',
+        level: 'workspace',
+        name: opts.name?.trim() || `Uploaded ${new Date(t).toISOString().slice(0, 16).replace('T', ' ')}`,
+        state: 'ready',
+        handle: { file: `${id}.tar.gz` },
+        handleSecrets: null,
+        sizeBytes: size,
+        error: null,
+        createdAt: t,
+        expiresAt: snaps.days > 0 ? t + snaps.days * 86_400_000 : null,
+      }
+      try {
+        await store.snapshots.insert(rec)
+      } catch (e) {
+        await removeSnapshotFile(snaps.dir, id).catch(() => {})
+        throw e
+      }
+      return rec
     },
 
     restore(owner, id, snapId) {

@@ -22,9 +22,9 @@ describe('loadConfig', () => {
   })
 
   it('snapshots are off without a folder and carry their limits', () => {
-    expect(loadConfig(base).snapshots).toEqual({ dir: null, maxBytes: 2048 * 1024 * 1024, days: 30, maxPerOwner: 10 })
+    expect(loadConfig(base).snapshots).toEqual({ dir: null, maxBytes: 2048 * 1024 * 1024, importMaxBytes: 2048 * 1024 * 1024, days: 30, maxPerOwner: 10 })
     const c = loadConfig({ ...base, AGENTRY_SANDBOX_SNAPSHOT_DIR: ' /var/lib/agentry-snaps ', AGENTRY_SANDBOX_SNAPSHOT_MAX_MB: '10', AGENTRY_SANDBOX_SNAPSHOT_DAYS: '0', AGENTRY_SANDBOX_MAX_SNAPSHOTS_PER_OWNER: '3' })
-    expect(c.snapshots).toEqual({ dir: '/var/lib/agentry-snaps', maxBytes: 10 * 1024 * 1024, days: 0, maxPerOwner: 3 })
+    expect(c.snapshots).toEqual({ dir: '/var/lib/agentry-snaps', maxBytes: 10 * 1024 * 1024, importMaxBytes: 2048 * 1024 * 1024, days: 0, maxPerOwner: 3 })
     expect(() => loadConfig({ ...base, AGENTRY_SANDBOX_SNAPSHOT_MAX_MB: '0' })).toThrow('AGENTRY_SANDBOX_SNAPSHOT_MAX_MB')
     expect(() => loadConfig({ ...base, AGENTRY_SANDBOX_SNAPSHOT_DAYS: 'x' })).toThrow('AGENTRY_SANDBOX_SNAPSHOT_DAYS')
   })

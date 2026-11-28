@@ -185,6 +185,41 @@ paths:
                 properties:
                   object: { const: list }
                   data: { type: array, items: { $ref: "#/components/schemas/Snapshot" } }
+  /v1/snapshots/import:
+    parameters: [{ $ref: "#/components/parameters/Owner" }]
+    post:
+      summary: Upload a workspace snapshot
+      description: |
+        The body is a tar archive of workspace files (`.tar.gz`; a plain `.tar` is compressed on arrival), sent
+        as `application/gzip` or `application/octet-stream`. It becomes a new `ready` `workspace` snapshot of the
+        owner with no source sandbox (`sandbox_id` is null), usable for restore and for creating a sandbox. Needs
+        `AGENTRY_SANDBOX_SNAPSHOT_DIR` (else 400 `snapshots_off`) and counts against the per-owner snapshot limit.
+        Every entry is checked before it is kept: 400 `invalid_request` for absolute paths, `..`, symlinks or hard
+        links that point outside the workspace, device files and other special entries, or a file that is not a tar.
+        413 when the upload is larger than `AGENTRY_SANDBOX_SNAPSHOT_IMPORT_MAX_MB` (default 2048), or unpacks to
+        more than four times that.
+      parameters:
+        - { name: name, in: query, required: false, schema: { type: string, maxLength: 200 }, description: Name for the snapshot; default "Uploaded" plus the time. }
+      requestBody:
+        required: true
+        content:
+          application/gzip: { schema: { type: string, format: binary } }
+          application/octet-stream: { schema: { type: string, format: binary } }
+      responses:
+        "201": { $ref: "#/components/responses/Snapshot" }
+        "400": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /v1/snapshots/{id}/download:
+    parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Owner" }]
+    get:
+      summary: Download a workspace snapshot
+      description: "Streams the snapshot's tar as `application/gzip` (an attachment, with `Content-Length`). 400 for a `disk` or `memory` snapshot (or one kept on a place), 409 `snapshot_not_ready` while saving or failed."
+      responses:
+        "200": { description: The archive., content: { application/gzip: { schema: { type: string, format: binary } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /v1/snapshots/{id}:
     parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Owner" }]
     get:
@@ -515,7 +550,7 @@ components:
       properties:
         id: { type: string, pattern: "^snap_[0-9a-f]{32}$" }
         object: { const: snapshot }
-        sandbox_id: { type: string, description: "The sandbox it was taken from (kept after that sandbox is deleted)." }
+        sandbox_id: { type: [string, "null"], description: "The sandbox it was taken from (kept after that sandbox is deleted); null for an uploaded snapshot." }
         place: { type: string, description: "`service` for a workspace tar kept on the service host, else the place that holds it." }
         level: { enum: [workspace, disk, memory] }
         name: { type: string }

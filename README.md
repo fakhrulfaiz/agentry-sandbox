@@ -63,6 +63,7 @@ A snapshot is a saved copy of a sandbox that outlives it and can be restored int
 |---|---|---|
 | `AGENTRY_SANDBOX_SNAPSHOT_DIR` | unset | folder on the service host for workspace snapshots; unset: workspace snapshots answer 400 `snapshots_off` (unless the place makes its own) |
 | `AGENTRY_SANDBOX_SNAPSHOT_MAX_MB` | `2048` | a workspace snapshot larger than this fails |
+| `AGENTRY_SANDBOX_SNAPSHOT_IMPORT_MAX_MB` | `2048` | the largest snapshot archive `POST /v1/snapshots/import` takes (413 beyond; also 413 when it unpacks to over four times this) |
 | `AGENTRY_SANDBOX_SNAPSHOT_DAYS` | `30` | the sweep deletes older snapshots; `0` keeps them until deleted |
 | `AGENTRY_SANDBOX_MAX_SNAPSHOTS_PER_OWNER` | `10` | saving or ready snapshots per owner (429 beyond) |
 

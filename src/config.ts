@@ -60,6 +60,8 @@ export interface SnapshotConfig {
   dir: string | null
   /** The most one generic snapshot may hold (bytes); a bigger one fails. */
   maxBytes: number
+  /** The most an uploaded snapshot may be (bytes); a bigger upload is refused with 413. */
+  importMaxBytes: number
   /** Days a snapshot is kept before the sweep deletes it; 0 keeps them until deleted. */
   days: number
   /** Snapshots one owner may have (saving or ready); 0 turns saving off. */
@@ -164,6 +166,7 @@ export function loadConfig(env: Env): SandboxConfig {
     snapshots: {
       dir: env.AGENTRY_SANDBOX_SNAPSHOT_DIR?.trim() || null,
       maxBytes: integer(env, 'AGENTRY_SANDBOX_SNAPSHOT_MAX_MB', 2048) * 1024 * 1024,
+      importMaxBytes: integer(env, 'AGENTRY_SANDBOX_SNAPSHOT_IMPORT_MAX_MB', 2048, 1) * 1024 * 1024,
       days: integer(env, 'AGENTRY_SANDBOX_SNAPSHOT_DAYS', 30, 0),
       maxPerOwner: integer(env, 'AGENTRY_SANDBOX_MAX_SNAPSHOTS_PER_OWNER', 10, 0),
     },
