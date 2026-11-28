@@ -1,6 +1,6 @@
 {
   "name": "@agentry/sandbox",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Agentry Sandbox: hardened Docker sandboxes on demand, each running E2B's envd, behind an authenticated relay.",
   "type": "module",
