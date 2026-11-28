@@ -55,6 +55,29 @@ Hardened Docker sandboxes on demand for Agentry agents. Each sandbox is one cont
 
 `ghcr.io/fakhrulfaiz/agentry-sandbox-service` is the service (distinct from `agentry-sandbox`, the default sandbox base image). `docker/compose.yaml` runs it with its own Postgres on a Linux host: `cp docker/agentry-sandbox.env.example .env`, set `POSTGRES_PASSWORD`, `AGENTRY_SANDBOX_KEY` and `AGENTRY_SANDBOX_SECRET`, then `docker compose -f docker/compose.yaml up -d`. The container mounts the host's Docker socket (the service drives Docker; the sandboxes never get it) and uses the host network; `docker/README.md` explains both. Releases: a merge to `main` with a new `package.json` version publishes the image and a `v<version>` GitHub Release (notes from the `## <version>` section of `CHANGELOG.md`). The Agentry API and Web composes start it with `COMPOSE_PROFILES=sandbox`.
 
+## Snapshots
+
+A snapshot is a saved copy of a sandbox that outlives it and can be restored into the sandbox or used to start a new one. Routes: `POST /v1/sandboxes/{id}/snapshots` (202, poll `GET /v1/snapshots/{id}` until `ready` or `failed`), `GET /v1/snapshots[?sandbox=]`, `DELETE /v1/snapshots/{id}`, `POST /v1/sandboxes/{id}/restore {snapshot}`, and `snapshot` on `POST /v1/sandboxes`. Every id is owner-scoped. `GET /v1/backends` lists each place's `snapshots` levels.
+
+| Setting | Default | |
+|---|---|---|
+| `AGENTRY_SANDBOX_SNAPSHOT_DIR` | unset | folder on the service host for workspace snapshots; unset: workspace snapshots answer 400 `snapshots_off` (unless the place makes its own) |
+| `AGENTRY_SANDBOX_SNAPSHOT_MAX_MB` | `2048` | a workspace snapshot larger than this fails |
+| `AGENTRY_SANDBOX_SNAPSHOT_DAYS` | `30` | the sweep deletes older snapshots; `0` keeps them until deleted |
+| `AGENTRY_SANDBOX_MAX_SNAPSHOTS_PER_OWNER` | `10` | saving or ready snapshots per owner (429 beyond) |
+
+Levels: `workspace` (files of the workspace folder), `disk` (whole filesystem), `memory` (disk plus running programs). A `workspace` snapshot is a `tar` of the workspace streamed through envd into the snapshot folder; it works on every place and restores on any place (into a stopped sandbox it starts it for the copy and stops it again). The sandbox keeps running during the copy, so it is taken live; `stop_first` applies only to place-made snapshots. Restoring replaces the workspace's files; creating from one unpacks it over the template's files. `disk` and `memory` snapshots are the place's own and restore only on the place that took them. A request for a level the place lacks answers 400 naming the levels it has. Deleting a sandbox keeps its snapshots. Snapshot data and provider handles never appear in responses. Interrupted saves are marked failed at startup.
+
+What each kind of place does itself (the `workspace` snapshot above works on all of them):
+
+| Place | `disk` | `memory` | Kept |
+|---|---|---|---|
+| Docker (local, over SSH) | yes: `docker commit` of the container (paused for the commit) plus a copy of the workspace volume | no | on the place's Docker host: volume `agentry-snap-<id>`, image `agentry-snap:<id>`. A disk snapshot restores in place (the container is rebuilt from the image, the workspace volume emptied and refilled) or into a new sandbox on the same place. The Docker places also take a native `workspace` snapshot (a volume copy by a helper container with no network), which restores on that place only. |
+| E2B | yes (E2B snapshot) | yes | at E2B, as a template; restoring makes a new E2B sandbox from it and removes the old one (E2B cannot rewind one). **Not confirmed against live E2B:** the snapshot route (`POST /sandboxes/{id}/snapshots`), creating from a snapshot id as `templateID` and deleting with `DELETE /templates/{id}` follow the plan and are tested only against the fake E2B. |
+| SSH machine | no | no | `workspace` snapshots use the generic path (kept on the service host); a copy kept on the machine itself is not built |
+
+MCP clients get `sandbox_snapshot`, `sandbox_restore`, `sandbox_list_snapshots` and `sandbox_delete_snapshot`. Not built: audit events and metrics for snapshots (they wait for the audit log and metrics work).
+
 ## Security model
 
 - **Container wall:** default seccomp, `CapDrop: ALL` plus a short list (no `NET_RAW`, `NET_ADMIN`, `SYS_ADMIN`), not privileged, no bind mounts, no Docker socket, pids/cpu/memory limits; gVisor with one setting.

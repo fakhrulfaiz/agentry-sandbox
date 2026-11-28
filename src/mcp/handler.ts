@@ -6,7 +6,7 @@
  */
 import type http from 'node:http'
 import { posix } from 'node:path'
-import { createSandboxApi, runInEnvd, SandboxApiError, type SandboxApi, type WireSandbox, type WireTemplate } from '../client/index.ts'
+import { createSandboxApi, runInEnvd, SandboxApiError, type SandboxApi, type WireSandbox, type WireSnapshot, type WireTemplate } from '../client/index.ts'
 
 const PROTOCOL = '2025-03-26'
 const OUT_MAX = 20_000
@@ -88,7 +88,35 @@ export const TOOLS: Tool[] = [
       return { path: inWorkspace(s, String(a.path)), bytes: bytes.byteLength }
     },
   },
+  {
+    name: 'sandbox_snapshot',
+    description: 'Save a snapshot of a sandbox and wait (up to 10 minutes) until it is ready. level: "workspace" (default) keeps the files in the workspace; "disk" also keeps installed software, where the place supports it. Snapshots count against your limit; delete old ones with sandbox_delete_snapshot.',
+    inputSchema: schema({ ...ID, name: { type: 'string', description: 'A short name for the snapshot.' }, level: { type: 'string', enum: ['workspace', 'disk', 'memory'], description: 'Default workspace.' } }, ['id']),
+    run: async (api, a) => {
+      const level = str(a.level)
+      if (level !== undefined && level !== 'workspace' && level !== 'disk' && level !== 'memory') throw new Error('level must be workspace, disk or memory')
+      let snap = await api.snapshot(String(a.id), { ...(str(a.name) ? { name: str(a.name)! } : {}), ...(level ? { level } : {}) })
+      const until = Date.now() + SNAPSHOT_WAIT_MS
+      while (snap.state === 'saving' && Date.now() < until) {
+        await new Promise((r) => setTimeout(r, 200))
+        snap = await api.getSnapshot(snap.id)
+      }
+      if (snap.state === 'failed') throw new Error(`the snapshot failed: ${snap.error ?? 'unknown reason'}`)
+      return snapSummary(snap)
+    },
+  },
+  {
+    name: 'sandbox_restore',
+    description: 'Put a ready snapshot back into a sandbox of yours. A workspace snapshot replaces every file in the workspace; a disk or memory snapshot rebuilds the sandbox (only on the place it was taken). Files changed since the snapshot are lost.',
+    inputSchema: schema({ ...ID, snapshot: { type: 'string', description: 'The snapshot id (snap_...), from sandbox_list_snapshots.' } }, ['id', 'snapshot']),
+    run: async (api, a) => summary(await api.restore(String(a.id), String(a.snapshot))),
+  },
+  { name: 'sandbox_list_snapshots', description: 'List your snapshots (optionally of one sandbox) with their state and size. A snapshot outlives its sandbox.', inputSchema: schema({ id: { type: 'string', description: "Only this sandbox's snapshots." } }), run: async (api, a) => ({ snapshots: (await api.listSnapshots(str(a.id) ? { sandbox: str(a.id)! } : {})).map(snapSummary) }) },
+  { name: 'sandbox_delete_snapshot', description: 'Delete a snapshot and its saved data. This cannot be undone.', inputSchema: schema({ snapshot: { type: 'string' } }, ['snapshot']), run: async (api, a) => { await api.deleteSnapshot(String(a.snapshot)); return { snapshot: String(a.snapshot), deleted: true } } },
 ]
+
+const snapSummary = (s: WireSnapshot) => ({ id: s.id, sandbox: s.sandbox_id, name: s.name, level: s.level, state: s.state, size_bytes: s.size_bytes, ...(s.error ? { error: s.error } : {}), created_at: s.created_at })
+const SNAPSHOT_WAIT_MS = 10 * 60_000
 
 const reply = (res: http.ServerResponse, status: number, body?: unknown) => {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })

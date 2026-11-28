@@ -1,6 +1,6 @@
 /** Postgres Store: the `sandboxes` and `templates` tables from `migrations/`. */
 import type pg from 'pg'
-import type { PlacePatch, PlaceRecord, SandboxPatch, SandboxRecord, Store, TemplatePatch, TemplateRecord } from './types.ts'
+import type { PlacePatch, PlaceRecord, SandboxPatch, SandboxRecord, SnapshotPatch, SnapshotRecord, Store, TemplatePatch, TemplateRecord } from './types.ts'
 
 interface SandboxRow {
   id: string
@@ -31,6 +31,22 @@ interface PlaceRow {
   created_at: Date
   updated_at: Date
 }
+interface SnapshotRow {
+  id: string
+  owner: string
+  sandbox_id: string
+  place: string
+  level: SnapshotRecord['level']
+  name: string
+  state: SnapshotRecord['state']
+  handle: Record<string, string>
+  handle_secrets: string | null
+  // bigint comes back from pg as a string
+  size_bytes: string | null
+  error: string | null
+  created_at: Date
+  expires_at: Date | null
+}
 interface TemplateRow {
   id: string
   owner: string
@@ -60,6 +76,22 @@ const sandboxOf = (r: SandboxRow): SandboxRecord => ({
   lastUsedAt: ms(r.last_used_at),
 })
 const templateOf = (r: TemplateRow): TemplateRecord => ({ id: r.id, owner: r.owner, name: r.name, spec: r.spec, createdAt: r.created_at.getTime(), updatedAt: r.updated_at.getTime() })
+
+const snapshotOf = (r: SnapshotRow): SnapshotRecord => ({
+  id: r.id,
+  owner: r.owner,
+  sandboxId: r.sandbox_id,
+  place: r.place,
+  level: r.level,
+  name: r.name,
+  state: r.state,
+  handle: r.handle,
+  handleSecrets: r.handle_secrets,
+  sizeBytes: r.size_bytes === null ? null : Number(r.size_bytes),
+  error: r.error,
+  createdAt: r.created_at.getTime(),
+  expiresAt: ms(r.expires_at),
+})
 
 const placeOf = (r: PlaceRow): PlaceRecord => ({
   id: r.id,
@@ -99,6 +131,15 @@ const PLACE_COLUMNS: Record<keyof PlacePatch, Column> = {
   maxRunning: ['max_running', (v) => v],
   gpus: ['gpus', (v) => (v === null ? null : JSON.stringify(v))],
   updatedAt: ['updated_at', (v) => ts((v as number | null) ?? null)],
+}
+const SNAPSHOT_COLUMNS: Record<keyof SnapshotPatch, Column> = {
+  name: ['name', (v) => v],
+  state: ['state', (v) => v],
+  handle: ['handle', (v) => JSON.stringify(v)],
+  handleSecrets: ['handle_secrets', (v) => v],
+  sizeBytes: ['size_bytes', (v) => v],
+  error: ['error', (v) => v],
+  expiresAt: ['expires_at', (v) => ts((v as number | null) ?? null)],
 }
 const TEMPLATE_COLUMNS: Record<keyof TemplatePatch, Column> = {
   name: ['name', (v) => v],
@@ -190,6 +231,47 @@ export function createPostgresStore(pool: pg.Pool, opts: { ownsPool: boolean } =
       },
       async delete(id, owner) {
         return ((await pool.query('delete from templates where id = $1 and owner = $2', [id, owner])).rowCount ?? 0) > 0
+      },
+    },
+    snapshots: {
+      async insert(r) {
+        await pool.query(
+          `insert into snapshots (id, owner, sandbox_id, place, level, name, state, handle, handle_secrets, size_bytes, error, created_at, expires_at)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          [r.id, r.owner, r.sandboxId, r.place, r.level, r.name, r.state, JSON.stringify(r.handle), r.handleSecrets, r.sizeBytes, r.error, ts(r.createdAt), ts(r.expiresAt)],
+        )
+      },
+      async get(id, owner) {
+        const row = one((await pool.query<SnapshotRow>('select * from snapshots where id = $1 and owner = $2', [id, owner])).rows)
+        return row && snapshotOf(row)
+      },
+      async getAny(id) {
+        const row = one((await pool.query<SnapshotRow>('select * from snapshots where id = $1', [id])).rows)
+        return row && snapshotOf(row)
+      },
+      async list(owner, opts = {}) {
+        const rows = opts.sandboxId === undefined
+          ? (await pool.query<SnapshotRow>('select * from snapshots where owner = $1 order by created_at, id', [owner])).rows
+          : (await pool.query<SnapshotRow>('select * from snapshots where owner = $1 and sandbox_id = $2 order by created_at, id', [owner, opts.sandboxId])).rows
+        return rows.map(snapshotOf)
+      },
+      async update(id, owner, patch) {
+        const { sql, values } = setClause(patch, SNAPSHOT_COLUMNS, 3)
+        if (!sql) {
+          const row = one((await pool.query<SnapshotRow>('select * from snapshots where id = $1 and owner = $2', [id, owner])).rows)
+          return row && snapshotOf(row)
+        }
+        const row = one((await pool.query<SnapshotRow>(`update snapshots set ${sql} where id = $1 and owner = $2 returning *`, [id, owner, ...values])).rows)
+        return row && snapshotOf(row)
+      },
+      async delete(id, owner) {
+        return ((await pool.query('delete from snapshots where id = $1 and owner = $2', [id, owner])).rowCount ?? 0) > 0
+      },
+      async listAll() {
+        return (await pool.query<SnapshotRow>('select * from snapshots order by created_at, id')).rows.map(snapshotOf)
+      },
+      async listExpired(at) {
+        return (await pool.query<SnapshotRow>('select * from snapshots where expires_at is not null and expires_at <= $1 order by created_at, id', [ts(at)])).rows.map(snapshotOf)
       },
     },
     places: {

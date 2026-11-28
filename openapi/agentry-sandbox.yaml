@@ -55,6 +55,7 @@ paths:
                 template_id: { type: string, description: "A stored template; `template` fields override it." }
                 place: { type: string, description: "Id of the place to run on (from /v1/backends); else the template's, else the default place." }
                 template: { $ref: "#/components/schemas/TemplateSpec" }
+                snapshot: { type: string, pattern: "^snap_[0-9a-f]{32}$", description: "One of the owner's ready snapshots to start from. A `workspace` snapshot is unpacked over the template's files (any place); a `disk` or `memory` snapshot makes the sandbox from the snapshot itself and runs only on the place that took it." }
       responses:
         "201": { $ref: "#/components/responses/Sandbox" }
         "400": { $ref: "#/components/responses/Error" }
@@ -120,6 +121,82 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /v1/sandboxes/{id}/snapshots:
+    parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Owner" }]
+    post:
+      summary: Take a snapshot of a sandbox (in the background)
+      description: >-
+        Answers 202 with the snapshot in `saving`; it becomes `ready` or `failed` (with `error`). Poll
+        `GET /v1/snapshots/{id}`. A `workspace` snapshot is a tar of the workspace folder kept on the service host
+        (needs `AGENTRY_SANDBOX_SNAPSHOT_DIR`, else 400 `snapshots_off`), restorable on any place; a stopped sandbox
+        is started for it and stopped again. `disk` and `memory` are the place's own (see `snapshots` on
+        `/v1/backends`); a level the place cannot do answers 400 naming it.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 200 }
+                level: { enum: [workspace, disk, memory], default: workspace }
+                stop_first: { type: boolean, default: false, description: "Stop the sandbox, snapshot, start it again (place-native snapshots; a workspace snapshot of a running sandbox is always taken live)." }
+      responses:
+        "202": { $ref: "#/components/responses/Snapshot" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /v1/sandboxes/{id}/restore:
+    parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Owner" }]
+    post:
+      summary: Restore a snapshot into a sandbox
+      description: >-
+        `workspace` replaces the workspace files in place (running or stopped sandbox). `disk` and `memory` rebuild
+        the sandbox from the snapshot on its own place, like a reset. Both ids are owner-checked.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [snapshot]
+              properties:
+                snapshot: { type: string, pattern: "^snap_[0-9a-f]{32}$" }
+      responses:
+        "200": { $ref: "#/components/responses/Sandbox" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /v1/snapshots:
+    get:
+      summary: List snapshots
+      parameters:
+        - { $ref: "#/components/parameters/Owner" }
+        - { name: sandbox, in: query, required: false, schema: { type: string }, description: Only snapshots taken from this sandbox (kept after the sandbox is deleted). }
+      responses:
+        "200":
+          description: The owner's snapshots, oldest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { const: list }
+                  data: { type: array, items: { $ref: "#/components/schemas/Snapshot" } }
+  /v1/snapshots/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }, { $ref: "#/components/parameters/Owner" }]
+    get:
+      summary: Get a snapshot
+      responses:
+        "200": { $ref: "#/components/responses/Snapshot" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete a snapshot and its bytes (cancels one still being taken)
+      responses:
+        "204": { description: Deleted. }
+        "404": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /v1/sandboxes/{id}/envd/{path}:
     parameters:
@@ -322,6 +399,20 @@ paths:
       responses:
         "200": { description: Revoked. }
         "404": { $ref: "#/components/responses/Error" }
+  /v1/admin/snapshots:
+    get:
+      summary: Admin. Every owner's snapshots
+      security: [{ bearer: [] }]
+      responses:
+        "200": { description: The snapshots, newest first, each with its `owner`., content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+  /v1/admin/snapshots/{id}:
+    delete:
+      summary: Admin. Delete a snapshot
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: Deleted. }
+        "404": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     bearer: { type: http, scheme: bearer }
@@ -342,13 +433,18 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Sandbox" }
+    Snapshot:
+      description: A snapshot.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Snapshot" }
     Template:
       description: A template.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Template" }
     Error:
-      description: "`unauthorized` 401, `owner_required` 400, `invalid_request` 400 (also a template over the per-sandbox CPU or memory maximum), `not_found` 404, `sandbox_failed` 409, `quota_exceeded` 429 (a sandbox, running or creation-rate limit; the message says which), `place_unavailable` 503 (the message names the place), `place_disabled` 409, `gpu_unavailable` 409 (the place has too few free GPUs; the message says how many of how many). Admin routes also use `place_in_use` 409 and `place_host_key_changed` 409."
+      description: "`unauthorized` 401, `owner_required` 400, `invalid_request` 400 (also a template over the per-sandbox CPU or memory maximum), `not_found` 404, `sandbox_failed` 409, `quota_exceeded` 429 (a sandbox, running or creation-rate limit; the message says which), `place_unavailable` 503 (the message names the place), `snapshots_off` 400 (no `AGENTRY_SANDBOX_SNAPSHOT_DIR`), `snapshot_not_ready` 409, `place_disabled` 409, `gpu_unavailable` 409 (the place has too few free GPUs; the message says how many of how many). Admin routes also use `place_in_use` 409 and `place_host_key_changed` 409."
       content:
         application/json:
           schema:
@@ -413,6 +509,21 @@ components:
         steps: { type: integer, description: "`running_setup` only: how many setup commands there are." }
         detail: { type: string, description: "`running_setup` only: the command, cut to 120 characters." }
         updated_at: { type: integer }
+    Snapshot:
+      type: object
+      required: [id, object, sandbox_id, place, level, name, state, created_at]
+      properties:
+        id: { type: string, pattern: "^snap_[0-9a-f]{32}$" }
+        object: { const: snapshot }
+        sandbox_id: { type: string, description: "The sandbox it was taken from (kept after that sandbox is deleted)." }
+        place: { type: string, description: "`service` for a workspace tar kept on the service host, else the place that holds it." }
+        level: { enum: [workspace, disk, memory] }
+        name: { type: string }
+        state: { enum: [saving, ready, failed] }
+        size_bytes: { type: [integer, "null"] }
+        error: { type: [string, "null"] }
+        created_at: { type: integer }
+        expires_at: { type: [integer, "null"], description: "The sweep deletes the snapshot after this (AGENTRY_SANDBOX_SNAPSHOT_DAYS)." }
     Template:
       type: object
       required: [id, object, name, spec, created_at, updated_at]
@@ -469,6 +580,10 @@ components:
             envdBuiltIn: { type: boolean }
             runsAsRoot: { type: boolean }
             templateFields: { type: array, items: { type: string } }
+        snapshots:
+          type: array
+          items: { enum: [workspace, disk, memory] }
+          description: The snapshot levels a sandbox on this place can have (`workspace` needs the snapshot folder or a place-native workspace snapshot).
         default_image:
           type: object
           description: The image used when a template names none, and what it ships (from its org.agentry.* labels, when present).

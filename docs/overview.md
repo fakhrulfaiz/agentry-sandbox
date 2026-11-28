@@ -77,13 +77,13 @@ Any MCP client (Claude Code, Cursor, another harness) can use the same sandboxes
 
 1. On the admin page, **Access keys**: create a key for a user. It is shown once and stored only as a hash. Use the same user name as in Agentry to share that user's sandboxes and limits.
 2. Point the client at `http://<host>:<port>/mcp` (streamable HTTP, JSON responses) with `Authorization: Bearer <key>`. For Claude Code: `claude mcp add --transport http sandbox http://<host>:<port>/mcp --header "Authorization: Bearer <key>"`.
-3. Tools: `sandbox_list`, `sandbox_create`, `sandbox_start`, `sandbox_stop`, `sandbox_delete`, `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`.
+3. Tools: `sandbox_list`, `sandbox_create`, `sandbox_start`, `sandbox_stop`, `sandbox_delete`, `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`, `sandbox_snapshot` (waits up to 10 minutes for `ready`), `sandbox_restore`, `sandbox_list_snapshots`, `sandbox_delete_snapshot`.
 
 A key acts only as its owner, on `/v1` as well as `/mcp`. The endpoint calls this service's own public API with the caller's key, so limits, the egress guard and per-owner scoping apply as for any caller. A sandbox made through MCP is a plain sandbox: it appears on the admin page, but Agentry Web lists *environments* (records in the Agentry API), so it does not show there unless the API adopts it. Interactive terminals are not offered over MCP.
 
 ## What it does not do
 
-- No SSH or inbound ports into a sandbox, and no snapshots.
+- No SSH or inbound ports into a sandbox. Snapshots are described in the README ("Snapshots").
 - No Daytona or Modal places yet.
 - Machine-over-SSH places are not isolated; E2B resets delete all files.
 - It does not run DeepSeek Harness itself, store chats, or hold user accounts: owners come from the Agentry API.

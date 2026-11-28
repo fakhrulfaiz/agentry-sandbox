@@ -15,7 +15,7 @@
  * Config `{ template, api_url, sandbox_host, timeout_s }`, secrets `{ api_key }`.
  */
 import type { TemplateSpec } from '../../store/types.ts'
-import { TransientPlaceError, type Driver, type Handle } from '../driver.ts'
+import { TransientPlaceError, type Driver, type Handle, type SnapshotRef } from '../driver.ts'
 import type { DriverFactory } from '../registry.ts'
 
 export interface E2bPlace {
@@ -65,12 +65,12 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
     return out
   }
 
-  async function request(method: string, path: string, body?: unknown): Promise<Response> {
+  async function request(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<Response> {
     let res: Response
     try {
       res = await doFetch(`${api}${path}`, {
         method,
-        headers: { 'X-API-Key': place.apiKey, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+        headers: { 'X-API-Key': place.apiKey, ...extra, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: AbortSignal.timeout(apiTimeout),
       })
@@ -152,9 +152,43 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
     return body.state === 'running' ? 'running' : 'stopped'
   }
 
+  /** Creates a sandbox from a template id (the place's template, or an E2B snapshot) and waits for its envd. */
+  async function createFrom(templateID: string, id: string, owner: string, spec: TemplateSpec): Promise<Handle> {
+    const res = await request('POST', '/v2/sandboxes', {
+      templateID,
+      timeout: place.timeoutS,
+      autoPause: true,
+      secure: true,
+      metadata: { [ID_KEY]: id, [OWNER_KEY]: owner },
+      ...(spec.env && Object.keys(spec.env).length > 0 ? { envVars: spec.env } : {}),
+      allow_internet_access: spec.network !== false,
+    })
+    if (!res.ok) await fail(res, 'creating the sandbox')
+    const made = (await res.json()) as { sandboxID?: unknown; envdAccessToken?: unknown }
+    if (typeof made.sandboxID !== 'string' || !made.sandboxID) throw new Error('E2B answered a create without a sandbox id')
+    if (typeof made.envdAccessToken !== 'string' || !made.envdAccessToken) {
+      await kill(made.sandboxID).catch(() => {})
+      throw new Error('E2B did not return an envd access token')
+    }
+    try {
+      await ready(made.sandboxID, made.envdAccessToken)
+    } catch (e) {
+      await kill(made.sandboxID).catch(() => {})
+      throw e
+    }
+    return { e2bId: made.sandboxID, [TOKEN]: made.envdAccessToken }
+  }
+
+  const snapshotId = (snap: SnapshotRef): string => {
+    const v = snap.handle.e2bSnapshotId
+    if (!v || !/^[A-Za-z0-9._:-]{1,128}$/u.test(v)) throw new Error('this snapshot has no E2B snapshot recorded')
+    return v
+  }
+
   const driver: Driver = {
     kind: 'e2b',
     capabilities: {
+      snapshots: ['disk', 'memory'],
       persistent: true,
       reset: true,
       keepFilesOnReset: false,
@@ -182,29 +216,46 @@ export function createE2bDriver(place: E2bPlace, deps: E2bDeps = {}): Driver {
 
     async create(id, owner, spec: TemplateSpec) {
       if (spec.image !== undefined) throw new Error("E2B uses templates; set the place's template ('image' is not supported)")
-      const res = await request('POST', '/v2/sandboxes', {
-        templateID: place.template,
-        timeout: place.timeoutS,
-        autoPause: true,
-        secure: true,
-        metadata: { [ID_KEY]: id, [OWNER_KEY]: owner },
-        ...(spec.env && Object.keys(spec.env).length > 0 ? { envVars: spec.env } : {}),
-        allow_internet_access: spec.network !== false,
-      })
-      if (!res.ok) await fail(res, 'creating the sandbox')
-      const made = (await res.json()) as { sandboxID?: unknown; envdAccessToken?: unknown }
-      if (typeof made.sandboxID !== 'string' || !made.sandboxID) throw new Error('E2B answered a create without a sandbox id')
-      if (typeof made.envdAccessToken !== 'string' || !made.envdAccessToken) {
-        await kill(made.sandboxID).catch(() => {})
-        throw new Error('E2B did not return an envd access token')
+      return createFrom(place.template, id, owner, spec)
+    },
+
+    async snapshot(_id, handle, _spec, { snapId, level }) {
+      const e2bId = idOf(handle)
+      // An E2B snapshot is a template: disk keeps the filesystem, memory the running processes too. Idempotent per snapshot id.
+      for (let attempt = 0; ; attempt++) {
+        const res = await request('POST', `/sandboxes/${e2bId}/snapshots`, { memory: level === 'memory' }, { 'Idempotency-Key': snapId })
+        if (res.ok) {
+          const made = (await res.json().catch(() => ({}))) as { snapshotID?: unknown }
+          if (typeof made.snapshotID !== 'string' || !made.snapshotID) throw new Error('E2B answered a snapshot without an id')
+          return { handle: { e2bSnapshotId: made.snapshotID } }
+        }
+        // 409: the sandbox is being paused for the snapshot right now; one retry.
+        if (res.status === 409 && attempt === 0) {
+          await sleep(retryDelay)
+          continue
+        }
+        await fail(res, 'taking the snapshot')
       }
-      try {
-        await ready(made.sandboxID, made.envdAccessToken)
-      } catch (e) {
-        await kill(made.sandboxID).catch(() => {})
-        throw e
-      }
-      return { e2bId: made.sandboxID, [TOKEN]: made.envdAccessToken }
+    },
+
+    async restoreSnapshot(id, handle, spec, snap) {
+      const e2bId = idOf(handle)
+      // E2B cannot rewind a sandbox: a new one is made from the snapshot and the old one goes.
+      const info = await request('GET', `/sandboxes/${e2bId}`)
+      const owner = info.ok ? (((await info.json().catch(() => ({}))) as { metadata?: Record<string, string> }).metadata?.[OWNER_KEY] ?? '') : ''
+      const fresh = await createFrom(snapshotId(snap), id, owner, spec)
+      await kill(e2bId).catch(() => {})
+      return fresh
+    },
+
+    async createFromSnapshot(id, owner, spec, _ctx, snap) {
+      return createFrom(snapshotId(snap), id, owner, spec)
+    },
+
+    async deleteSnapshot(snap) {
+      const res = await request('DELETE', `/templates/${encodeURIComponent(snapshotId(snap))}`)
+      if (res.ok || res.status === 404) return
+      await fail(res, 'deleting the snapshot')
     },
 
     async start(_id, handle) {
