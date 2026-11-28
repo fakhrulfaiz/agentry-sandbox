@@ -95,6 +95,8 @@ export interface Driver {
   status(handle: Handle): Promise<'running' | 'stopped' | 'missing'>
   /** Where envd answers for a running sandbox. */
   envdEndpoint(handle: Handle): Promise<{ baseUrl: string; token?: string; /** Extra headers sent upstream on every envd request (never returned to clients). */ headers?: Record<string, string>; release?: () => void }>
+  /** Where a TCP port inside a running sandbox answers, for the port preview. Absent: the place cannot preview ports (HTTP 501). */
+  portEndpoint?(handle: Handle, port: number): Promise<{ baseUrl: string; release?: () => void }>
   /** Every sandbox this driver manages, from its own labels (for reconciliation). */
   listManaged(): Promise<{ id: string; owner: string; handle: Handle }[]>
   /** Periodic upkeep of a running sandbox (Docker: re-apply its network rules). */

@@ -121,6 +121,14 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     return { baseUrl }
   }
 
+  /** The container's address on its bridge, where an app listening on 0.0.0.0 answers (not available when the daemon is reached over SSH). */
+  async function portEndpoint(handle: Handle, port: number): Promise<{ baseUrl: string }> {
+    const info = await client.getContainer(handle.containerId!).inspect()
+    const ip = info.NetworkSettings.Networks?.[handle.network ?? '']?.IPAddress
+    if (!ip) throw new Error('sandbox has no container IP')
+    return { baseUrl: `http://${ip}:${String(port)}` }
+  }
+
   /** Ends a container's shared reach when the machine is stopped, removed or replaced. */
   function forgetEndpoint(containerId: string | undefined): void {
     if (!containerId) return
@@ -538,6 +546,7 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     },
 
     envdEndpoint,
+    ...(options.reach ? {} : { portEndpoint }),
 
     async listManaged() {
       const list = await client.listContainers({ all: true, filters: { label: ['agentry.managed=true'] } })

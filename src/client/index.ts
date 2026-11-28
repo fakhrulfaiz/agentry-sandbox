@@ -99,7 +99,7 @@ export interface WireBackend {
 }
 
 /** Error codes the service answers with (others are possible). */
-export type SandboxApiErrorCode = 'unauthorized' | 'owner_required' | 'invalid_request' | 'not_found' | 'sandbox_failed' | 'quota_exceeded' | 'place_unavailable' | 'place_disabled' | 'gpu_unavailable' | 'place_in_use' | 'place_host_key_changed' | 'snapshots_off' | 'snapshot_not_ready' | 'unreachable' | (string & {})
+export type SandboxApiErrorCode = 'unauthorized' | 'owner_required' | 'invalid_request' | 'not_found' | 'sandbox_failed' | 'quota_exceeded' | 'place_unavailable' | 'place_disabled' | 'gpu_unavailable' | 'place_in_use' | 'place_host_key_changed' | 'snapshots_off' | 'snapshot_not_ready' | 'port_preview_unsupported' | 'port_unreachable' | 'unreachable' | (string & {})
 
 /** A failed call: the service's `{ error: { code, message } }`, or `unreachable` when it did not answer. */
 export class SandboxApiError extends Error {

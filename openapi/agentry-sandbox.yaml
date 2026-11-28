@@ -255,6 +255,27 @@ paths:
       summary: Relay a call to the sandbox's envd
       responses:
         default: { description: "envd's response, streamed." }
+  /v1/sandboxes/{id}/ports/{port}/{path}:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+      - { $ref: "#/components/parameters/Owner" }
+      - name: port
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1, maximum: 65535 }
+      - name: path
+        in: path
+        required: true
+        description: A path on the web app listening on that port inside the sandbox. Any method; GET and POST are listed. The app must listen on 0.0.0.0 (not only 127.0.0.1). Docker places only; others answer 501 `port_preview_unsupported`.
+        schema: { type: string }
+    get:
+      summary: Proxy a request to a port inside the sandbox
+      responses:
+        default: { description: "The app's response, streamed." }
+    post:
+      summary: Proxy a request to a port inside the sandbox
+      responses:
+        default: { description: "The app's response, streamed." }
   /v1/templates:
     post:
       summary: Create a template

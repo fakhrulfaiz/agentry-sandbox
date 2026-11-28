@@ -174,6 +174,10 @@ export function createFakeDriver(): FakeDriver {
       down()
       return { baseUrl }
     },
+    async portEndpoint() {
+      down()
+      return { baseUrl }
+    },
     async maintain(id) {
       calls.push(`maintain ${id}`)
     },

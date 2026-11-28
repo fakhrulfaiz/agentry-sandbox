@@ -15,11 +15,12 @@ import { openSecrets, sealSecrets } from '../crypto/secrets.ts'
 import { HostKeyChangedError, type Driver } from '../places/driver.ts'
 import { LOCAL_PLACE_ID, type PlaceRegistry, type ProbeResult } from '../places/registry.ts'
 import type { SandboxConfig } from '../config.ts'
-import { GpuUnavailableError, LimitError, NotFoundError, PlaceDisabledError, PlaceUnavailableError, QuotaExceededError, SnapshotNotReadyError, SnapshotsOffError, type SandboxService } from '../sandboxes.ts'
+import { GpuUnavailableError, LimitError, NotFoundError, PlaceDisabledError, PlaceUnavailableError, PortPreviewUnsupportedError, QuotaExceededError, SnapshotNotReadyError, SnapshotsOffError, type SandboxService } from '../sandboxes.ts'
 import type { GpuInfo, PlaceRecord, Progress, SandboxRecord, SnapshotLevel, SnapshotRecord, Store, TemplateRecord, TemplateSpec } from '../store/types.ts'
 import { handleMcp } from '../mcp/handler.ts'
 import { createOwnerKeys, keyToWire } from './owner-keys.ts'
 import { relay } from './relay.ts'
+import { proxyPort } from './port-proxy.ts'
 
 class PlaceInUseError extends Error {
   constructor(placeName: string, count: number) {
@@ -237,6 +238,8 @@ export const ROUTES: Route[] = [
   { method: 'DELETE', openapi: '/v1/snapshots/{id}' },
   { method: 'GET', openapi: '/v1/sandboxes/{id}/envd/{path}' },
   { method: 'POST', openapi: '/v1/sandboxes/{id}/envd/{path}' },
+  { method: 'GET', openapi: '/v1/sandboxes/{id}/ports/{port}/{path}' },
+  { method: 'POST', openapi: '/v1/sandboxes/{id}/ports/{port}/{path}' },
   { method: 'POST', openapi: '/v1/templates' },
   { method: 'GET', openapi: '/v1/templates' },
   { method: 'GET', openapi: '/v1/templates/{id}' },
@@ -598,6 +601,10 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
       } else if (action === 'envd') {
         await relay(service, ctx.owner, id, rest.join('/'), ctx.req, ctx.res)
         return 'handled'
+      } else if (action === 'ports') {
+        if (!/^[1-9]\d{0,4}$/.test(rest[0] ?? '') || Number(rest[0]) > 65535) throw invalid('port must be a number from 1 to 65535')
+        await proxyPort(service, ctx.owner, id, Number(rest[0]), rest.slice(1).join('/'), ctx.req, ctx.res)
+        return 'handled'
       } else if (method === 'POST' && action === 'snapshots' && rest.length === 0) {
         return { status: 202, body: snapshotToWire(await service.snapshot(ctx.owner, id, snapshotInputFromWire(await ctx.body()))) }
       } else if (method === 'POST' && action === 'restore' && rest.length === 0) {
@@ -743,6 +750,7 @@ export function createServer(deps: { config: SandboxConfig; service: SandboxServ
         if (e instanceof PlaceDisabledError) return fail(res, 409, 'place_disabled', e.message)
         if (e instanceof GpuUnavailableError) return fail(res, 409, 'gpu_unavailable', e.message)
         if (e instanceof QuotaExceededError) return fail(res, 429, 'quota_exceeded', e.message)
+        if (e instanceof PortPreviewUnsupportedError) return fail(res, 501, 'port_preview_unsupported', e.message)
         if (e instanceof SnapshotsOffError) return fail(res, 400, 'snapshots_off', e.message)
         if (e instanceof SnapshotNotReadyError) return fail(res, 409, 'snapshot_not_ready', e.message)
         if (e instanceof ArchiveError) return fail(res, e.tooLarge ? 413 : 400, 'invalid_request', e.message)

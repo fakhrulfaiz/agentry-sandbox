@@ -96,6 +96,14 @@ export class SnapshotNotReadyError extends Error {
   }
 }
 
+/** The place cannot reach ports inside its sandboxes (HTTP 501 `port_preview_unsupported`). */
+export class PortPreviewUnsupportedError extends Error {
+  constructor(place: string) {
+    super(`${place} cannot preview ports yet.`)
+    this.name = 'PortPreviewUnsupportedError'
+  }
+}
+
 export interface CreateSandbox {
   name: string
   templateId?: string
@@ -127,6 +135,8 @@ export interface SandboxService {
   touch(owner: string, id: string): Promise<void>
   /** Where to reach the sandbox's envd, and its access token; starts a stopped sandbox. */
   endpoint(owner: string, id: string): Promise<{ baseUrl: string; token: string; headers?: Record<string, string>; release?: () => void; /** Maps the requested envd user (SSH machine: `agent` is the login user). */ envdUser?: (requested: string) => string }>
+  /** Where a port inside the sandbox answers (starts a stopped sandbox); throws PortPreviewUnsupportedError on places that cannot. */
+  portEndpoint(owner: string, id: string, port: number): Promise<{ baseUrl: string; release?: () => void }>
   /** Marks a connection to the sandbox as open; the idle sweep skips it until the returned function is called. */
   beginUse(id: string): () => void
   sweepIdle(): Promise<string[]>
@@ -803,6 +813,13 @@ export function createSandboxService(deps: {
       const place = placeOf(r)
       const { baseUrl, token, headers, release } = await call(place, () => place.driver.envdEndpoint(dh(r)))
       return { baseUrl, token: token ?? envdToken(config.secret, r.id), ...(headers ? { headers } : {}), ...(release ? { release } : {}), ...(place.driver.envdUser ? { envdUser: place.driver.envdUser.bind(place.driver) } : {}) }
+    },
+
+    async portEndpoint(owner, id, port) {
+      const r = await locked(id, () => doStart(owner, id))
+      const place = placeOf(r)
+      if (!place.driver.portEndpoint) throw new PortPreviewUnsupportedError(place.name)
+      return call(place, () => place.driver.portEndpoint!(dh(r), port))
     },
 
     beginUse(id) {
