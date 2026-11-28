@@ -33,12 +33,19 @@ describe('port proxy', () => {
   it('relays method, path, query and body, and keeps the caller credentials from the app', async () => {
     const id = await create()
     const r = await s.call(`/v1/sandboxes/${id}/ports/8765/a/b.html?x=1`, { method: 'POST', body: '{"k":1}', headers: { cookie: 'sid=1' } })
-    expect(r.status).toBe(200)
-    expect(await r.text()).toBe('<h1>hi</h1>')
+    const text = await r.text()
+    expect(r.status, text).toBe(200)
+    expect(text).toBe('<h1>hi</h1>')
     expect(seen[0]).toMatchObject({ method: 'POST', url: '/a/b.html?x=1', body: '{"k":1}' })
     expect(seen[0]!.headers.authorization).toBeUndefined()
     expect(seen[0]!.headers.cookie).toBeUndefined()
     expect(seen[0]!.headers['x-agentry-owner']).toBeUndefined()
+  })
+
+  it('keeps a trailing slash', async () => {
+    const id = await create()
+    await (await s.call(`/v1/sandboxes/${id}/ports/8765/dir/`)).text()
+    expect(seen[0]!.url).toBe('/dir/')
   })
 
   it('answers 404 for another owner and 400 for a bad port', async () => {

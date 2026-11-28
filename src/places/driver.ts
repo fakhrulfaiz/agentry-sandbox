@@ -3,6 +3,7 @@
  * makes the machine and gets envd reachable; the shared bootstrap
  * (`bootstrap.ts`) then provisions it the same way for every kind.
  */
+import type { Duplex } from 'node:stream'
 import type { GpuInfo, ProgressUpdate, SnapshotLevel, TemplateSpec } from '../store/types.ts'
 
 /**
@@ -95,8 +96,8 @@ export interface Driver {
   status(handle: Handle): Promise<'running' | 'stopped' | 'missing'>
   /** Where envd answers for a running sandbox. */
   envdEndpoint(handle: Handle): Promise<{ baseUrl: string; token?: string; /** Extra headers sent upstream on every envd request (never returned to clients). */ headers?: Record<string, string>; release?: () => void }>
-  /** Where a TCP port inside a running sandbox answers, for the port preview. Absent: the place cannot preview ports (HTTP 501). */
-  portEndpoint?(handle: Handle, port: number): Promise<{ baseUrl: string; release?: () => void }>
+  /** A byte stream to a TCP port inside a running sandbox (127.0.0.1 there), for the port preview. Absent: the place cannot preview ports (HTTP 501). Closing it ends the connection. */
+  portConnect?(handle: Handle, port: number): Promise<Duplex>
   /** Every sandbox this driver manages, from its own labels (for reconciliation). */
   listManaged(): Promise<{ id: string; owner: string; handle: Handle }[]>
   /** Periodic upkeep of a running sandbox (Docker: re-apply its network rules). */

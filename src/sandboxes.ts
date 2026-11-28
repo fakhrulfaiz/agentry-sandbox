@@ -11,6 +11,7 @@
  * service) may have and run, how fast they may be created, and how large a
  * template may make one.
  */
+import type { Duplex } from 'node:stream'
 import { randomBytes } from 'node:crypto'
 import type { Limits, SandboxConfig } from './config.ts'
 import { openSecrets, sealSecrets } from './crypto/secrets.ts'
@@ -135,8 +136,8 @@ export interface SandboxService {
   touch(owner: string, id: string): Promise<void>
   /** Where to reach the sandbox's envd, and its access token; starts a stopped sandbox. */
   endpoint(owner: string, id: string): Promise<{ baseUrl: string; token: string; headers?: Record<string, string>; release?: () => void; /** Maps the requested envd user (SSH machine: `agent` is the login user). */ envdUser?: (requested: string) => string }>
-  /** Where a port inside the sandbox answers (starts a stopped sandbox); throws PortPreviewUnsupportedError on places that cannot. */
-  portEndpoint(owner: string, id: string, port: number): Promise<{ baseUrl: string; release?: () => void }>
+  /** A byte stream to a port inside the sandbox (starts a stopped sandbox); throws PortPreviewUnsupportedError on places that cannot. */
+  portConnect(owner: string, id: string, port: number): Promise<Duplex>
   /** Marks a connection to the sandbox as open; the idle sweep skips it until the returned function is called. */
   beginUse(id: string): () => void
   sweepIdle(): Promise<string[]>
@@ -815,11 +816,11 @@ export function createSandboxService(deps: {
       return { baseUrl, token: token ?? envdToken(config.secret, r.id), ...(headers ? { headers } : {}), ...(release ? { release } : {}), ...(place.driver.envdUser ? { envdUser: place.driver.envdUser.bind(place.driver) } : {}) }
     },
 
-    async portEndpoint(owner, id, port) {
+    async portConnect(owner, id, port) {
       const r = await locked(id, () => doStart(owner, id))
       const place = placeOf(r)
-      if (!place.driver.portEndpoint) throw new PortPreviewUnsupportedError(place.name)
-      return call(place, () => place.driver.portEndpoint!(dh(r), port))
+      if (!place.driver.portConnect) throw new PortPreviewUnsupportedError(place.name)
+      return call(place, () => place.driver.portConnect!(dh(r), port))
     },
 
     beginUse(id) {

@@ -38,6 +38,7 @@ function createDockerBackend(cfg: SandboxConfig, guard = createPassthroughNetwor
   return {
     available: () => driver.probe(),
     endpoint: (h: Handle) => driver.envdEndpoint(h),
+    portConnect: (h: Handle, port: number) => driver.portConnect!(h, port),
     stop: (h: Handle) => driver.stop(h),
     status: (h: Handle) => driver.status(h),
     destroy: (id: string, h: Handle, o: { keepWorkspace: boolean }) => driver.destroy(id, h, o),
@@ -88,6 +89,22 @@ describe.skipIf(!dockerAvailable)('docker driver', () => {
     expect(bindings.every((b) => b.HostIp === '127.0.0.1')).toBe(true)
     expect(info.Config.Labels).toMatchObject({ 'agentry.sandbox.id': id, 'agentry.sandbox.owner': 'alice', 'agentry.managed': 'true' })
   })
+
+  it('portConnect carries a request to a server inside the container, also one bound to loopback only', async () => {
+    const cfg = config()
+    const backend = createDockerBackend(cfg)
+    const id = newId()
+    const handle = await backend.create(id, 'alice', {})
+    await shell(cfg, backend, id, handle, 'agent', 'mkdir -p /tmp/site && echo preview-ok > /tmp/site/index.html && (nohup python3 -m http.server 8801 --bind 127.0.0.1 --directory /tmp/site >/dev/null 2>&1 &) ; sleep 1')
+    const socket = await backend.portConnect(handle, 8801)
+    let got = ''
+    socket.on('data', (c: Buffer) => { got += c.toString() })
+    const closed = new Promise<void>((r) => socket.on('close', () => r()))
+    socket.write('GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
+    await closed
+    expect(got).toContain('200 OK')
+    expect(got).toContain('preview-ok')
+  }, 120_000)
 
   it('native snapshots: a volume copy restores files, a disk snapshot keeps installs, delete removes volume and image', async () => {
     const cfg = config()

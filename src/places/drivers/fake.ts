@@ -1,3 +1,4 @@
+import { connect } from 'node:net'
 /**
  * An in-memory Driver for tests (here and in Agentry's API): records every
  * call, can fail the next start, go unavailable, lose or invent sandboxes,
@@ -174,9 +175,10 @@ export function createFakeDriver(): FakeDriver {
       down()
       return { baseUrl }
     },
-    async portEndpoint() {
+    async portConnect() {
       down()
-      return { baseUrl }
+      const u = new URL(baseUrl)
+      return connect(Number(u.port), u.hostname)
     },
     async maintain(id) {
       calls.push(`maintain ${id}`)

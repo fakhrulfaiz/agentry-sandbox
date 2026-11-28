@@ -3,6 +3,7 @@
  * (injected, so any image works), with the workspace on a named volume.
  * It places envd and gets it reachable; provisioning is the shared bootstrap.
  */
+import { Duplex, PassThrough } from 'node:stream'
 import Docker from 'dockerode'
 import type { SandboxConfig } from '../../config.ts'
 import { createEnvdClient } from '../../envd/client.ts'
@@ -121,12 +122,32 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     return { baseUrl }
   }
 
-  /** The container's address on its bridge, where an app listening on 0.0.0.0 answers (not available when the daemon is reached over SSH). */
-  async function portEndpoint(handle: Handle, port: number): Promise<{ baseUrl: string }> {
-    const info = await client.getContainer(handle.containerId!).inspect()
-    const ip = info.NetworkSettings.Networks?.[handle.network ?? '']?.IPAddress
-    if (!ip) throw new Error('sandbox has no container IP')
-    return { baseUrl: `http://${ip}:${String(port)}` }
+  /**
+   * A connection to `127.0.0.1:<port>` inside the container, carried over a Docker exec (so it works whatever the host's
+   * network, over SSH too, and also reaches servers bound to loopback only). The exec runs bash's `/dev/tcp`.
+   */
+  async function portConnect(handle: Handle, port: number): Promise<Duplex> {
+    const container = client.getContainer(handle.containerId!)
+    const script = `exec 3<>/dev/tcp/127.0.0.1/${String(Math.trunc(port))} || exit 111; exec 4<&0; cat <&4 >&3 & cat <&3; kill $! 2>/dev/null; exit 0`
+    const exec = await container.exec({ Cmd: ['bash', '-c', script], AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: false })
+    const raw = await exec.start({ hijack: true, stdin: true })
+    const out = new PassThrough()
+    const err = new PassThrough()
+    client.modem.demuxStream(raw, out, err)
+    raw.on('end', () => out.end())
+    raw.on('error', (e: Error) => out.destroy(e))
+    err.resume()
+    const duplex = new Duplex({
+      allowHalfOpen: false,
+      read() { out.resume() },
+      write(chunk, _enc, cb) { raw.write(chunk, cb) },
+      final(cb) { raw.end(); cb() },
+      destroy(e, cb) { raw.destroy(); out.destroy(); cb(e) },
+    })
+    out.on('data', (c: Buffer) => { if (!duplex.push(c)) out.pause() })
+    out.on('end', () => duplex.push(null))
+    out.on('error', (e) => duplex.destroy(e))
+    return duplex
   }
 
   /** Ends a container's shared reach when the machine is stopped, removed or replaced. */
@@ -546,7 +567,7 @@ export function createDockerDriver(config: SandboxConfig, network: NetworkGuard,
     },
 
     envdEndpoint,
-    ...(options.reach ? {} : { portEndpoint }),
+    portConnect,
 
     async listManaged() {
       const list = await client.listContainers({ all: true, filters: { label: ['agentry.managed=true'] } })
