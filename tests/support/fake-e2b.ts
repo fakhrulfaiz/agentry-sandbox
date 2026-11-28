@@ -20,6 +20,8 @@ export interface FakeE2b {
   url: string
   apiKey: string
   sandboxes: Map<string, FakeSandbox>
+  /** Snapshots taken (E2B keeps a snapshot as a template), by id. */
+  snapshots: Map<string, { sandboxID: string; memory: boolean; idempotencyKey: string | undefined }>
   /** Every request as `METHOD path`. */
   log: string[]
   /** Request bodies by `METHOD path`. */
@@ -38,6 +40,7 @@ export interface FakeE2b {
 /** `envdUpstream`: a real envd's base URL; sandbox-host requests (those with `E2b-Sandbox-Id`) are checked and proxied there. */
 export async function startFakeE2b(apiKey = 'e2b_test_key_123', opts: { envdUpstream?: string } = {}): Promise<FakeE2b> {
   const sandboxes = new Map<string, FakeSandbox>()
+  const snapshots: FakeE2b['snapshots'] = new Map()
   const log: string[] = []
   const bodies: FakeE2b['bodies'] = []
   let failing: { status: number; headers: Record<string, string> } | undefined
@@ -99,7 +102,8 @@ export async function startFakeE2b(apiKey = 'e2b_test_key_123', opts: { envdUpst
         return send(f.status, { message: 'forced failure' }, f.headers)
       }
       if (req.method === 'POST' && path === '/v2/sandboxes') {
-        const b = (body ?? {}) as { metadata?: Record<string, string>; timeout?: number; secure?: boolean }
+        const b = (body ?? {}) as { metadata?: Record<string, string>; timeout?: number; secure?: boolean; templateID?: string }
+        if (b.templateID?.startsWith('snap-e2b-') && !snapshots.has(b.templateID)) return send(404, { message: 'template not found' })
         const id = `isb${String((counter += 1))}`
         const s: FakeSandbox = { sandboxID: id, state: 'running', envdAccessToken: `tok-${id}-secret`, secure: b.secure === true, metadata: b.metadata ?? {}, body: b as Record<string, unknown>, timeout: b.timeout ?? 0 }
         sandboxes.set(id, s)
@@ -113,7 +117,12 @@ export async function startFakeE2b(apiKey = 'e2b_test_key_123', opts: { envdUpst
         const more = next + limit < all.length
         return send(200, page.map((s) => ({ sandboxID: s.sandboxID, state: s.state, metadata: s.metadata })), more ? { 'x-next-token': String(next + limit) } : {})
       }
-      const m = /^\/(?:v2\/)?sandboxes\/([^/]+)(?:\/(pause|connect|timeout))?$/u.exec(path)
+      const tpl = /^\/templates\/([^/]+)$/u.exec(path)
+      if (req.method === 'DELETE' && tpl) {
+        if (!snapshots.delete(decodeURIComponent(tpl[1]!))) return send(404, { message: 'template not found' })
+        return send(204)
+      }
+      const m = /^\/(?:v2\/)?sandboxes\/([^/]+)(?:\/(pause|connect|timeout|snapshots))?$/u.exec(path)
       if (!m) return send(404, { message: 'not found' })
       const s = sandboxes.get(m[1]!)
       if (!s) return send(404, { message: 'sandbox not found' })
@@ -122,6 +131,14 @@ export async function startFakeE2b(apiKey = 'e2b_test_key_123', opts: { envdUpst
       if (req.method === 'DELETE' && !action) {
         sandboxes.delete(s.sandboxID)
         return send(204)
+      }
+      if (req.method === 'POST' && action === 'snapshots') {
+        const key = req.headers['idempotency-key']
+        const again = [...snapshots].find(([, v]) => key !== undefined && v.idempotencyKey === key)
+        if (again) return send(201, { snapshotID: again[0], names: [] })
+        const snapId = `snap-e2b-${String((counter += 1))}`
+        snapshots.set(snapId, { sandboxID: s.sandboxID, memory: ((body ?? {}) as { memory?: boolean }).memory === true, idempotencyKey: typeof key === 'string' ? key : undefined })
+        return send(201, { snapshotID: snapId, names: [] })
       }
       if (req.method === 'POST' && action === 'pause') {
         if (s.state === 'paused') return send(409, { message: 'already paused' })
@@ -146,6 +163,7 @@ export async function startFakeE2b(apiKey = 'e2b_test_key_123', opts: { envdUpst
     url: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`,
     apiKey,
     sandboxes,
+    snapshots,
     log,
     bodies,
     hangNext: () => { hanging = true },
