@@ -24,6 +24,10 @@ async function cleanup() {
   for (const v of (await d.listVolumes()).Volumes ?? []) {
     if (v.Name.startsWith('agentry-sbx-sbx_test')) await d.getVolume(v.Name).remove().catch(() => {})
   }
+  for (const v of (await d.listVolumes({ filters: { label: ['agentry.snapshot.id'] } })).Volumes ?? []) {
+    if (v.Labels?.['agentry.snapshot.id']?.startsWith('snap_test')) await d.getVolume(v.Name).remove().catch(() => {})
+  }
+  for (const i of await d.listImages({ filters: { reference: ['agentry-snap:snap_test*'] } })) await d.getImage(i.Id).remove({ force: true }).catch(() => {})
 }
 
 /** The driver plus the shared bootstrap, as one create/start (a failed bootstrap removes or stops the machine). */
@@ -84,6 +88,37 @@ describe.skipIf(!dockerAvailable)('docker driver', () => {
     expect(bindings.every((b) => b.HostIp === '127.0.0.1')).toBe(true)
     expect(info.Config.Labels).toMatchObject({ 'agentry.sandbox.id': id, 'agentry.sandbox.owner': 'alice', 'agentry.managed': 'true' })
   })
+
+  it('native snapshots: a volume copy restores files, a disk snapshot keeps installs, delete removes volume and image', async () => {
+    const cfg = config()
+    const backend = createDockerBackend(cfg)
+    const driver = createDockerDriver(cfg, createPassthroughNetworkGuard())
+    const id = newId()
+    const handle = await backend.create(id, 'alice', {})
+    expect(driver.capabilities.snapshots).toEqual(['workspace', 'disk'])
+    await shell(cfg, backend, id, handle, 'agent', 'echo v1 > /workspace/f && sudo touch /usr/local/bin/marker')
+    const snapId = `snap_test${randomBytes(14).toString('hex')}`
+    const taken = await driver.snapshot!(id, handle, {}, { snapId, level: 'disk', name: 'one' })
+    expect(taken.handle.volume).toBe(`agentry-snap-${snapId}`)
+    expect(taken.handle.image).toBe(`agentry-snap:${snapId}`)
+    // Change things, then bring the snapshot back in place.
+    await shell(cfg, backend, id, handle, 'agent', 'echo v2 > /workspace/f && sudo rm /usr/local/bin/marker && touch /workspace/extra')
+    const restored = await driver.restoreSnapshot!(id, handle, {}, { id: snapId, level: 'disk', handle: taken.handle }, { gpuIds: [] })
+    const handle2 = await bootstrap(driver, id, restored, {}, { secret: cfg.secret, dshRuntime: dockerDshRuntime(cfg), startTimeoutMs: cfg.startTimeoutMs, dshRef: cfg.dshRuntimeImage })
+    const back = await shell(cfg, backend, id, handle2, 'agent', 'cat /workspace/f; ls /usr/local/bin/marker; ls /workspace/extra 2>&1 || true')
+    expect(back.stdout).toContain('v1')
+    expect(back.stdout).toContain('/usr/local/bin/marker')
+    expect(back.stdout).not.toMatch(/^\/workspace\/extra$/m)
+    // A new sandbox from the snapshot gets the files.
+    const id2 = newId()
+    const created = await driver.createFromSnapshot!(id2, 'alice', {}, { gpuIds: [] }, { id: snapId, level: 'disk', handle: taken.handle })
+    const handle3 = await bootstrap(driver, id2, created, {}, { secret: cfg.secret, dshRuntime: dockerDshRuntime(cfg), startTimeoutMs: cfg.startTimeoutMs, dshRef: cfg.dshRuntimeImage })
+    expect((await shell(cfg, backend, id2, handle3, 'agent', 'cat /workspace/f')).stdout).toContain('v1')
+    await driver.deleteSnapshot!({ id: snapId, level: 'disk', handle: taken.handle })
+    await expect(docker().getVolume(taken.handle.volume!).inspect()).rejects.toThrow()
+    await expect(docker().getImage(taken.handle.image!).inspect()).rejects.toThrow()
+    await backend.destroy(id2, handle3, { keepWorkspace: false })
+  }, 240_000)
 
   it('installs persist across stop and start', async () => {
     const cfg = config()
