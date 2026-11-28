@@ -66,7 +66,17 @@ A snapshot is a saved copy of a sandbox that outlives it and can be restored int
 | `AGENTRY_SANDBOX_SNAPSHOT_DAYS` | `30` | the sweep deletes older snapshots; `0` keeps them until deleted |
 | `AGENTRY_SANDBOX_MAX_SNAPSHOTS_PER_OWNER` | `10` | saving or ready snapshots per owner (429 beyond) |
 
-Levels: `workspace` (files of the workspace folder), `disk` (whole filesystem), `memory` (disk plus running programs). A `workspace` snapshot is a `tar` of the workspace streamed through envd into the snapshot folder; it works on every place and restores on any place (into a stopped sandbox it starts it for the copy and stops it again). The sandbox keeps running during the copy, so it is taken live; `stop_first` applies only to place-made snapshots. Restoring replaces the workspace's files; creating from one unpacks it over the template's files. `disk` and `memory` snapshots are the place's own (see below) and restore only on the place that took them. Deleting a sandbox keeps its snapshots. Snapshot data and provider handles never appear in responses. Interrupted saves are marked failed at startup.
+Levels: `workspace` (files of the workspace folder), `disk` (whole filesystem), `memory` (disk plus running programs). A `workspace` snapshot is a `tar` of the workspace streamed through envd into the snapshot folder; it works on every place and restores on any place (into a stopped sandbox it starts it for the copy and stops it again). The sandbox keeps running during the copy, so it is taken live; `stop_first` applies only to place-made snapshots. Restoring replaces the workspace's files; creating from one unpacks it over the template's files. `disk` and `memory` snapshots are the place's own and restore only on the place that took them. A request for a level the place lacks answers 400 naming the levels it has. Deleting a sandbox keeps its snapshots. Snapshot data and provider handles never appear in responses. Interrupted saves are marked failed at startup.
+
+What each kind of place does itself (the `workspace` snapshot above works on all of them):
+
+| Place | `disk` | `memory` | Kept |
+|---|---|---|---|
+| Docker (local, over SSH) | yes: `docker commit` of the container (paused for the commit) plus a copy of the workspace volume | no | on the place's Docker host: volume `agentry-snap-<id>`, image `agentry-snap:<id>`. A disk snapshot restores in place (the container is rebuilt from the image, the workspace volume emptied and refilled) or into a new sandbox on the same place. The Docker places also take a native `workspace` snapshot (a volume copy by a helper container with no network), which restores on that place only. |
+| E2B | yes (E2B snapshot) | yes | at E2B, as a template; restoring makes a new E2B sandbox from it and removes the old one (E2B cannot rewind one). **Not confirmed against live E2B:** the snapshot route (`POST /sandboxes/{id}/snapshots`), creating from a snapshot id as `templateID` and deleting with `DELETE /templates/{id}` follow the plan and are tested only against the fake E2B. |
+| SSH machine | no | no | `workspace` snapshots use the generic path (kept on the service host); a copy kept on the machine itself is not built |
+
+MCP clients get `sandbox_snapshot`, `sandbox_restore`, `sandbox_list_snapshots` and `sandbox_delete_snapshot`. Not built: audit events and metrics for snapshots (they wait for the audit log and metrics work).
 
 ## Security model
 
